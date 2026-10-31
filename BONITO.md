@@ -134,3 +134,10 @@ Run (after the user unlocks the bootloader - `fastboot flashing unlock` WIPES An
   brownout. Window that works: Nov 1 00:00-14:00 UTC.
 - After that: macos-15 has only Xcode 16.x/26.x, whose iig emits IORPC.kernelContent (xnu-8796 lacks it,
   see NOTES.md). TODO: make the tree accept Xcode 16 iig, or obtain an Xcode 15 toolchain otherwise.
+
+## Backups and storage
+- 2026-10-31: per-device partitions pulled from a temporarily booted official TWRP 3.7.1_12-1-bonito
+  (`tools/bonito-backup.sh`, read-only): persist (40 MiB ext4), modemst1/2, fsg, fsc (data), modemcal (all
+  zero), devinfo. In backup/ (gitignored) + user's drive, SHA256SUMS verified on both.
+- Big files (iOS root image) can go on the user's FUSE drive "~/watr.lol Drive" (25 GB free); local / has
+  ~0.6 GB. Untested: root/loop access through that FUSE mount.
