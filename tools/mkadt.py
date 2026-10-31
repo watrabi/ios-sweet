@@ -39,6 +39,7 @@ TIMEBASE = 19200000
 BONITO_PHYS_BASE, BONITO_MEM_SIZE = 0x100000000, 0x7e2c0000              # upper bank only (safe)
 BONITO_WIDE_BASE, BONITO_WIDE_SIZE = 0xa2000000, 0x17e2c0000 - 0xa2000000  # after the memwalk passes
 BONITO_FB_H = 2160
+BONITO_EMMC, BONITO_EMMC_SIZE = 0x007c4000, 0x1000   # sdhc_1 hc + msm vendor regs (0x200..0x3ff)
 VTIMER_INTID = 19
 # QEMU virt (-M virt,gic-version=3 -cpu cortex-a76): GICD/GICR and the generic timer's CNTFRQ
 QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE = 0x08000000, 0x080a0000, 62500000
@@ -229,6 +230,13 @@ def build(seed=None, qemu=False, highmem=False, bonito=None):
         ('opposed-power-vol-buttons', u32(1)),
     ])
 
+    # bsd/dev/sweet_ufs.c eMMC transport (patch 0082): sdhc_1 left by ABL.
+    emmc = node('sweet-emmc', [
+        ph(),
+        ('compatible', cstr('qcom,sdhci-msm-v5')),
+        ('reg', u64(BONITO_EMMC, BONITO_EMMC_SIZE)),
+    ])
+
     product_props = d22ap_product()
     product = [node('product', [ph()] + product_props)] if product_props else []
 
@@ -248,7 +256,7 @@ def build(seed=None, qemu=False, highmem=False, bonito=None):
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product + ([] if qemu or bonito else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product + ([] if qemu else [emmc] if bonito else [ufs]))
 
 
 if __name__ == '__main__':

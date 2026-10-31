@@ -499,27 +499,27 @@ static void show_ext_csd(void)
 	con_line(line, WHITE);
 }
 
-static void show_gpt(void)
+static uint64_t show_gpt(void)
 {
 	const uint8_t *b = (const uint8_t *)blk;
 	uint32_t e;
 
 	if ((e = read_block(17, 1, blk))) {	/* LBA 1: GPT header */
 		err_line("GPT hdr", e);
-		return;
+		return 0;
 	}
 	con_hex2("LBA1", "ticks=", (uint32_t)last_ticks, "~khz=", est_khz(4096 + 200, last_ticks));
 	if (blk[0] != 0x20494645 || blk[1] != 0x54524150) {	/* "EFI PART" */
 		con_hex2("GPT", "sig0=", blk[0], "sig1=", blk[1]);
 		con_str("GPT", "no EFI PART signature");
-		return;
+		return 0;
 	}
 	uint64_t ent_lba = *(const uint64_t *)(b + 72);
 	uint32_t n_ent = *(const uint32_t *)(b + 80);
 	uint32_t ent_sz = *(const uint32_t *)(b + 84);
 	con_hex2("GPT", "entries=", n_ent, "size=", ent_sz);
 	if (ent_sz != 128 || n_ent > 256)
-		return;
+		return 0;
 
 	con_line("PARTITIONS  name / MiB   (userdata detail below)", GREEN);
 	char line[72], *p = line;
@@ -528,7 +528,7 @@ static void show_gpt(void)
 	for (uint32_t i = 0; i < n_ent; i++) {
 		if (i % 4 == 0 && (e = read_block(17, (uint32_t)ent_lba + i / 4, blk))) {
 			err_line("GPT ent", e);
-			return;
+			return 0;
 		}
 		const uint8_t *en = b + (i % 4) * 128;
 		const uint32_t *w = (const uint32_t *)en;
@@ -585,6 +585,129 @@ static void show_gpt(void)
 		*p = 0;
 		con_line(line, YELLOW);
 	}
+	return ud_first;
+}
+
+
+/* ---- speed test: HS52 + 8-bit, multi-block ADMA reads ---- */
+
+#define BENCH_BUF	0xa2000000UL	/* verified RAM (memwalk), below 4 GiB for 32-bit ADMA */
+#define BENCH_CHUNK	(1u << 20)	/* 1 MiB per CMD18, 16 x 64 KiB descriptors */
+static uint32_t adma_tab[2 * 16] __attribute__((aligned(8)));
+
+/* CMD6 SWITCH, access 3 = write byte (volatile EXT_CSD fields only here). */
+static uint32_t ext_switch(uint32_t rca, uint32_t index, uint32_t value)
+{
+	uint32_t r[4], e = cmd(6, (3u << 24) | (index << 16) | (value << 8), RSP_R1B, r);
+	if (e)
+		return e;
+	udelay(1000);
+	if ((e = cmd(13, rca << 16, RSP_R1, r)))
+		return e;
+	if (r[0] & (1u << 7))		/* SWITCH_ERROR */
+		return 0xdead0010;
+	return (r[0] >> 9 & 0xf) == 4 ? 0 : 0xdead0011;
+}
+
+/* CMD18 of nblk (<= 2048) blocks into pa, auto-CMD12 at the end. */
+static uint32_t read_multi(uint32_t lba, uint32_t nblk, uintptr_t pa)
+{
+	uint32_t bytes = nblk * 512, n = 0;
+	while (bytes) {
+		uint32_t len = bytes > 0x10000 ? 0x10000 : bytes;
+		adma_tab[2 * n] = ((len & 0xffff) << 16) | ADMA_TRAN | ADMA_VALID;	/* len 0 = 64 KiB */
+		adma_tab[2 * n + 1] = (uint32_t)pa;
+		pa += len, bytes -= len, n++;
+	}
+	adma_tab[2 * (n - 1)] |= ADMA_END;
+	__asm__ volatile("dsb sy" ::: "memory");
+	wr(HC(R_ADMA_LO), (uint32_t)(uintptr_t)adma_tab);
+	wr(HC(R_ADMA_HI), 0);
+	wr(HC(R_BLK), 512 | (nblk << 16));
+	/* mode: DMA | block count enable | auto CMD12 | read | multi */
+	uint32_t mode = (1u << 0) | (1u << 1) | (1u << 2) | (1u << 5);
+	uint32_t e = cmd(18, lba, RSP_R1 | DATA | (mode << 8), 0);
+	if (e)
+		return e;
+	uint64_t end = ticks() + 19200ULL * 5000;
+	uint32_t st;
+	while (!((st = rd(HC(R_INT))) & (INT_XFER_DONE | INT_ERR)))
+		if (ticks() > end) {
+			diag_int = st, diag_adma = rd(HC(R_ADMA_ERR));
+			reset_cmd_data();
+			return last_err = 0xdead0006;
+		}
+	if (st & INT_ERR) {
+		diag_int = st, diag_adma = rd(HC(R_ADMA_ERR));
+		reset_cmd_data();
+		return last_err = (st >> 16) | 0x40000;
+	}
+	wr(HC(R_INT), 0xffffffff);
+	__asm__ volatile("dsb sy" ::: "memory");
+	return 0;
+}
+
+static void speed_test(uint32_t rca, uint64_t ud_first)
+{
+	uint32_t e;
+	char line[64], *p;
+
+	con_line("SPEED TEST  HS52 + 8-bit, CMD18 + ADMA, read-only", GREEN);
+
+	/* 1. high-speed timing, then 48 MHz (GPLL6 384 MHz / (2*4)) + host HS bit */
+	if ((e = ext_switch(rca, 185, 1))) {
+		err_line("HS_TIMING", e);
+		return;
+	}
+	wr8(HC(R_HCTL), rd(HC(R_HCTL)) | (1u << 2));
+	if (set_sd_clock(4)) {
+		con_str("CLOCK", "48 MHz not stable");
+		return;
+	}
+	con_str("HS52", "card + host in high speed, clock /8 = 48 MHz");
+
+	/* 2. 8-bit bus (BUS_WIDTH 2 = 8-bit SDR) + host 8-bit bit */
+	if ((e = ext_switch(rca, 183, 2))) {
+		err_line("BUSWIDTH", e);
+		con_str("BUS", "staying 1-bit");
+	} else {
+		wr8(HC(R_HCTL), rd(HC(R_HCTL)) | (1u << 5));
+		con_str("BUS", "8-bit");
+	}
+	con_hex2("HOST", "hctl=", rd(HC(R_HCTL)), "clk=", rd(HC(R_CLK)));
+
+	/* 3. correctness: GPT header via CMD18 must match the slow CMD17 read */
+	if ((e = read_multi(0, 8, BENCH_BUF))) {
+		con_hex2("CMD18", "err=", e, "int=", diag_int);
+		con_hex("  admaerr", diag_adma);
+		return;
+	}
+	const volatile uint32_t *g = (const volatile uint32_t *)(BENCH_BUF + 512);
+	int ok = g[0] == 0x20494645 && g[1] == 0x54524150;
+	con_str("VERIFY", ok ? "GPT header matches at high speed" : "GPT header MISMATCH");
+	if (!ok)
+		return;
+
+	/* 4. 16 MiB from the start of userdata */
+	uint64_t t0 = ticks();
+	for (uint32_t i = 0; i < 16; i++)
+		if ((e = read_multi((uint32_t)ud_first + i * 2048, 2048, BENCH_BUF))) {
+			con_hex2("BENCH", "err=", e, "chunk=", i);
+			return;
+		}
+	uint64_t t = ticks() - t0;
+	uint32_t kbps = (uint32_t)(16ull * 1024 * 19200000 / (t ? t : 1));	/* KiB/s */
+	p = line;
+	p = put_s(p, "BENCH   16 MiB in ");
+	p = put_dec(p, t / 19200);
+	p = put_s(p, " ms = ");
+	p = put_dec(p, kbps / 1024);
+	*p++ = '.';
+	p = put_dec(p, (kbps % 1024) * 10 / 1024);
+	p = put_s(p, " MiB/s");
+	*p = 0;
+	con_line(line, YELLOW);
+	con_str("SPEED", "done - only reads and volatile CMD6 switches were sent");
 }
 
 void emmc_probe(void)
@@ -666,6 +789,12 @@ void emmc_probe(void)
 	}
 	con_hex2("EXTCSD", "adma ok, ticks=", (uint32_t)last_ticks, 0, 0);
 	show_ext_csd();
-	show_gpt();
+	uint64_t ud = show_gpt();
 	con_str("EMMC", "probe done - nothing was written to the card");
+	if (!ud)
+		return;
+	con_str("NEXT", "speed test in 45 s (photo this page)");
+	udelay(45000000);
+	con_clear(RED);
+	speed_test(rca, ud);
 }
