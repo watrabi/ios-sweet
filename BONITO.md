@@ -117,3 +117,12 @@ Run (after the user unlocks the bootloader - `fastboot flashing unlock` WIPES An
 2. Does the splash framebuffer update from CPU writes (video mode)?
 3. Did ABL leave sdhc_1 clocked/powered (pres/clk/hctl) and CQE on/off?
 4. 16K granule, no PAC, PSCI/SMP/GIC behave like sweet?
+
+## Kernel CI (fork watrabi/ios-sweet, branch bonito)
+- Fork created 2026-10-31, Actions enabled, `bonito` pushed (46ba1b0). Builds: `gh workflow run xnu.yml
+  -R watrabi/ios-sweet --ref bonito` (~7 min upstream), artifact `xnu-kernel`.
+- **macos-14 runner is being retired**: brownouts Oct 31 14:00-Nov 1 00:00 UTC and Nov 1 14:00-Nov 2
+  00:00 UTC, gone Nov 2 2026 (actions/runner-images#13518). First run 41250103082 was cancelled by the
+  brownout. Window that works: Nov 1 00:00-14:00 UTC.
+- After that: macos-15 has only Xcode 16.x/26.x, whose iig emits IORPC.kernelContent (xnu-8796 lacks it,
+  see NOTES.md). TODO: make the tree accept Xcode 16 iig, or obtain an Xcode 15 toolchain otherwise.
