@@ -97,8 +97,10 @@ def code_signature(image, code_limit, text_size, entitlements=None):
             struct.pack('>IIII', 0, sb_hdr, 5, sb_hdr + len(cd)) + cd + ent_blob)
 
 
-def build(obj, entitlements=None):
-    code, start = text_of(obj)
+def build(obj, entitlements=None, raw=None):
+    # raw=(code bytes, _start offset): code assembled by any toolchain (e.g. GNU as +
+    # objcopy -O binary -j .text), for hosts without an Apple-target clang.
+    code, start = raw if raw is not None else text_of(obj)
     assert CODE_OFF + len(code) <= SEG, 'code does not fit in one __TEXT page'
     sect = struct.pack('<16s16sQQIIIIIIII', b'__text', b'__TEXT', BASE + CODE_OFF, len(code),
                        CODE_OFF, 3, 0, 0, S_ATTR_CODE, 0, 0, 0)
@@ -130,7 +132,13 @@ def build(obj, entitlements=None):
 
 if __name__ == '__main__':
     # mkinit.py OBJ OUT [ENTITLEMENTS.plist]
-    ents = open(sys.argv[3], 'rb').read() if len(sys.argv) > 3 else None
-    out = build(open(sys.argv[1], 'rb').read(), ents)
+    # mkinit.py --raw TEXT.bin START_OFFSET OUT     (flat position-independent code)
+    if sys.argv[1] == '--raw':
+        raw = (open(sys.argv[2], 'rb').read(), int(sys.argv[3], 0))
+        out = build(None, None, raw)
+        sys.argv[2] = sys.argv[4]
+    else:
+        ents = open(sys.argv[3], 'rb').read() if len(sys.argv) > 3 else None
+        out = build(open(sys.argv[1], 'rb').read(), ents)
     open(sys.argv[2], 'wb').write(out)
     print(f'{sys.argv[2]}: {len(out)} bytes')

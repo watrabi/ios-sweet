@@ -10,7 +10,8 @@
 #include "console.h"
 #include "mmu.h"
 #include "loader.h"
-#include "ufs.h"
+#include "emmc.h"
+#include "fdt.h"
 
 #define IMEM_RESTART_REASON	0x146aa65cUL	/* qcom,msm-imem restart_reason@65c */
 #define RESTART_BOOTLOADER	0x77665500U
@@ -59,6 +60,7 @@ static inline void wr8(uintptr_t a, uint8_t v) { *(volatile uint8_t *)a = v; }
 extern char secondary_entry[];
 
 static const char *stage;	/* set at runtime: no absolute pointers in data */
+static volatile uint64_t walk_addr;	/* memwalk: last address touched */
 static volatile uint64_t sec_mpidr[NR_CPUS];
 static volatile uint64_t sec_probe[4];	/* CPU1 redistributor write test */
 static volatile uint32_t irq_count, irq_other, irq_last;
@@ -104,10 +106,8 @@ static void delay_ms(unsigned ms)
 static void __attribute__((noreturn)) reset(unsigned after_s)
 {
 	con_skip();
-	con_str("RESET", after_s > 20 ? "in 40s" : "in 20s");
+	con_hex("RESET in s", after_s);
 	delay_ms(after_s * 1000);
-	wr32(IMEM_RESTART_REASON, RESTART_BOOTLOADER);
-	__asm__ volatile("dsb sy" ::: "memory");
 	smc(PSCI_SYSTEM_RESET, 0, 0, 0);
 	wr32(PSHOLD, 0);
 	for (;;)
@@ -151,6 +151,8 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 	}
 	con_hex2("SLOT", "n=", slot, "cpu=", rsr("mpidr_el1"));
 	con_str("STAGE", stage);
+	if (walk_addr)
+		con_hex("WALK at", walk_addr);
 	con_hex("ESR", rsr("esr_el1"));
 	con_hex("ELR", rsr("elr_el1"));
 	con_hex("FAR", rsr("far_el1"));
@@ -349,7 +351,7 @@ static void __attribute__((unused)) psci_line(const char *label, uint64_t fn)
 
 static uint64_t scratch[8192];	/* 64KB, lives in our (later cacheable) image */
 
-static uint64_t ticks_fill(uint32_t c)
+static uint64_t __attribute__((unused)) ticks_fill(uint32_t c)
 {
 	uint64_t t = now();
 	con_clear(c);
@@ -370,6 +372,74 @@ static uint32_t to_us(uint64_t ticks)
 	return ticks * 10 / 192;	/* 19.2 MHz */
 }
 
+static void cpu_regs(void)
+{
+	uint64_t el;
+	__asm__ volatile("mrs %0, CurrentEL" : "=r"(el));
+	con_hex2("CPU", "midr=", rsr("midr_el1"), "mpidr=", rsr("mpidr_el1"));
+	con_hex2(" el", "el=", el >> 2, "sctlr=", rsr("sctlr_el1"));
+	con_hex("MMFR0", rsr("id_aa64mmfr0_el1"));	/* [23:20] TGran16: 1 = 16K ok */
+	con_hex("MMFR1", rsr("id_aa64mmfr1_el1"));
+	con_hex("PFR0", rsr("id_aa64pfr0_el1"));	/* [27:24] GIC sysregs */
+	con_hex("ISAR0", rsr("id_aa64isar0_el1"));
+	con_hex("ISAR1", rsr("id_aa64isar1_el1"));	/* APA/API/GPA/GPI = PAC: expect 0 */
+	con_hex("CNTFRQ", rsr("cntfrq_el0"));
+}
+
+/*
+ * bonito milestone 1. Page 1: what ABL handed us (live FDT memory map).
+ * Page 2: CPU, MMU, PSCI, SMP, GIC timer, eMMC host state. Photograph both.
+ */
+
+#ifdef MEMWALK
+/*
+ * bonito memory walk: is 0xa2000000..0x17e2c0000 (above the last fixed
+ * carve-out, across the 4 GiB bank boundary) plain RAM we may write?
+ * MMU off = Device-nGnRnE accesses, no caching, no speculation. Two words
+ * per 64 KiB, write then read back. A TZ/XPU-protected hole shows up as a
+ * blue SError/SYNC screen with "WALK at", a mismatch count, or a reset
+ * (then the last progress line on screen is the clue).
+ */
+#define WALK_LO		0x0a2000000UL
+#define WALK_HI		0x17e2c0000UL
+#define WALK_STEP	0x10000UL
+#define WALK_LINE	0x8000000UL	/* progress every 128 MiB */
+
+static void memwalk(void)
+{
+	uint64_t bad = 0, first_bad = 0, n = 0;
+
+	stage = "memwalk";
+	__asm__ volatile("msr daifclr, #4" ::: "memory");	/* take SErrors */
+	con_line("MEMWALK  a2000000..17e2c0000, 2 words / 64 KiB", GREEN);
+	for (uint64_t a = WALK_LO; a < WALK_HI; a += WALK_STEP) {
+		for (uint64_t off = 0; off < WALK_STEP; off += WALK_STEP / 2) {
+			volatile uint64_t *p = (volatile uint64_t *)(a + off);
+			uint64_t pat = (a + off) ^ 0x5a5aa5a5c3c33c3cULL;
+			walk_addr = a + off;
+			*p = pat;
+			__asm__ volatile("dsb sy" ::: "memory");
+			if (*p != pat) {
+				if (!bad)
+					first_bad = a + off;
+				bad++;
+			}
+			n++;
+		}
+		if (((a + WALK_STEP) & (WALK_LINE - 1)) == 0 || a + WALK_STEP >= WALK_HI) {
+			con_hex2("  ok to", "hi=", (a + WALK_STEP) >> 32, "lo=", (uint32_t)(a + WALK_STEP));
+			delay_ms(300);
+		}
+	}
+	__asm__ volatile("dsb sy; isb" ::: "memory");
+	walk_addr = 0;
+	con_hex2("WALKED", "words=", n, "bad=", bad);
+	if (bad)
+		con_hex("1st bad", first_bad);
+	con_str("RESULT", bad ? "MISMATCHES - range not clean" : "all reads matched");
+}
+#endif
+
 void shim_main(uint64_t dtb)
 {
 	struct mmu_info mi;
@@ -377,59 +447,69 @@ void shim_main(uint64_t dtb)
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
 	stage = "loader";
 	con_clear(RED);
-	con_str("SHIM", "sweet milestone 4: xnu loader");
-	con_skip();
+#if defined(EMMCPROBE)
+	con_str("SHIM", "bonito emmc probe");
+#elif defined(MEMWALK)
+	con_str("SHIM", "bonito memwalk");
+#else
+	con_str("SHIM", "bonito milestone 1: probe");
+#endif
+	con_hex2("DTB", "at=", dtb, "magic=", dtb ? __builtin_bswap32(rd32(dtb)) : 0);
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
 	con_skip();
 
-	/* No payload: probe the internal UFS while the MMU is still off. */
-	stage = "ufs";
-	test_ufs();
+	stage = "fdt";
+	con_line("PAGE 1/2  live FDT memory map (base 0 = dynamic pool)", GREEN);
+	fdt_dump_memmap(dtb);
 	con_skip();
-	/* Keep the probe results on screen (later tests clear it); reset after 3 min. */
-	con_str("UFS", "probe done, reset in ~3 min");
-	delay_ms(180000);
-	reset(20);
+#ifdef EMMCPROBE
+	delay_ms(5000);
+	con_clear(RED);
+	stage = "emmc probe";
+	emmc_probe();
+	reset(300);
+#endif
+#ifdef MEMWALK
+	delay_ms(5000);
+	con_clear(RED);
+	memwalk();
+	reset(240);
+#endif
+	con_str("NEXT", "page 2 in 90 s");
+	delay_ms(90000);
 
-	stage = "fill off";
-	uint64_t fill_off = ticks_fill(RED);
-	uint64_t mem_off = ticks_mem();
-
-	stage = "mmu enable";
-	int rc = mmu_enable(&mi);
-
-	stage = "fill on";
-	uint64_t fill_on = rc ? 0 : ticks_fill(RED);
-	uint64_t mem_on = rc ? 0 : ticks_mem();
-	if (rc)
-		con_clear(RED);
-
-	con_str("SHIM", "sweet milestone 3");
-	con_skip();
-	con_hex2("DTB", "at=", dtb, "magic=", dtb ? __builtin_bswap32(rd32(dtb)) : 0);
-	con_hex2("IMAGE", "lo=", mi.img_lo, "hi=", mi.img_hi);
-	con_hex2("MMU", "rc=", rc, "l3=", mi.n_l3);
-	con_hex2("TTBR0", "pa=", mi.ttbr, "pa_hi=", mi.ttbr >> 32);
-	con_hex("SCTLR0", mi.sctlr_before);
-	con_hex("SCTLR1", mi.sctlr_after);
-	con_hex("TCR", rsr("tcr_el1"));
-	con_hex2("PARANGE", "mmfr0=", rsr("id_aa64mmfr0_el1") & 0xf, "tg16=", (rsr("id_aa64mmfr0_el1") >> 20) & 0xf);
-	con_skip();
-	con_hex("PAR img", mmu_probe((uintptr_t)shim_main));
-	con_hex("PAR fb", mmu_probe(FB_PHYS + 0x1000));
-	con_hex("PAR gic", mmu_probe(GICD_BASE));
-	con_hex("PAR 12G", mmu_probe(0x300000000UL));
-	con_skip();
-	con_hex2("FILL us", "off=", to_us(fill_off), "on=", to_us(fill_on));
-	con_hex2("MEM us", "off=", to_us(mem_off), "on=", to_us(mem_on));
+	stage = "cpu";
+	con_clear(RED);
+	con_line("PAGE 2/2  cpu / psci / smp / gic / mmu / emmc", GREEN);
+	cpu_regs();
 	con_skip();
 
 	stage = "psci";
 	con_hex2("PSCI", "ver=", smc(PSCI_VERSION, 0, 0, 0), "smccc=", smc(SMCCC_VERSION, 0, 0, 0));
+	psci_line("F CPU_ON", PSCI_CPU_ON);
+	psci_line("F SUSP", PSCI_SYSTEM_SUSPEND);
+	psci_line("F RESET2", PSCI_SYSTEM_RESET2);
+	/* MMU still off: secondaries write their MPIDR uncached, we read it uncached. */
+	test_smp();
 	con_skip();
+
 	test_gic();
+	con_skip();
+
+	stage = "mmu enable";
+	int rc = mmu_enable(&mi);
+	con_hex2("MMU", "rc=", rc, "l3=", mi.n_l3);
+	con_hex2("IMAGE", "lo=", mi.img_lo, "hi=", mi.img_hi);
+	con_hex("PAR img", mmu_probe((uintptr_t)shim_main));
+	con_hex("PAR fb", mmu_probe(FB_PHYS + 0x1000));
+	con_hex2("MEM us", "loop=", to_us(ticks_mem()), 0, 0);
+	con_skip();
+
+	/* Last: a register load from a clock-gated block could stall the bus. */
+	stage = "emmc";
+	test_emmc();
 
 	stage = "done";
-	reset(40);
+	reset(180);
 }

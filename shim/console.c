@@ -5,7 +5,7 @@
 #include "console.h"
 #include "font.h"
 
-#define SCALE		3
+#define SCALE		2	/* bonito: 64 cols x 66 rows on 1080x2160 */
 #define CH_W		(8 * SCALE)
 #define CH_H		(16 * SCALE)
 #define MARGIN		24
@@ -93,5 +93,24 @@ void con_hex2(const char *label, const char *a, uint32_t va, const char *b, uint
 		fmt_hex(buf, vb, 8);
 		put_str(col, buf, WHITE);
 	}
+	row++;
+}
+
+void con_line(const char *s, uint32_t fg)
+{
+	put_str(0, s, fg);
+	row++;
+}
+
+void con_reg(const char *name, uint64_t base, uint64_t size)
+{
+	char buf[11];
+	int col = put_str(0, name, YELLOW);
+	col = col < 30 ? 30 : col + 1;
+	fmt_hex(buf, base, 10);
+	col = put_str(col, buf, WHITE);
+	col = put_str(col + 1, "+", YELLOW);
+	fmt_hex(buf, size, 10);
+	put_str(col, buf, WHITE);
 	row++;
 }

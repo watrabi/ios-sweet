@@ -7,7 +7,10 @@
 _head:
 	b	_start			/* code0 */
 	.long	0			/* code1 */
-	.quad	0			/* text_offset */
+#ifndef TEXT_OFFSET
+#define TEXT_OFFSET 0x80000	/* bonito ABL: 0 -> "Invalid Parameter" */
+#endif
+	.quad	TEXT_OFFSET		/* text_offset (bonito stock: 0x80000) */
 	.quad	_end			/* image_size (linked at 0) */
 	.quad	0xa			/* flags: LE, 4K pages, place anywhere */
 	.quad	0			/* res2 */

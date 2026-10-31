@@ -34,6 +34,11 @@ FB_W, FB_H, FB_STRIDE = 1080, 2400, 1080 * 4
 # Internal UFS host (ufshc@1d84000 "ufs_mem"); QEMU virt has none
 UFS, UFS_SIZE = 0x01d84000, 0x3000
 TIMEBASE = 19200000
+# bonito (Pixel 3a XL, SDM670). Live FDT (BONITO.md): banks <0x80000000 2G> + <0x100000000 0x7e2c0000>,
+# adjacent; last fixed carve-out ends at 0xa1c11000 (ramoops_meta).
+BONITO_PHYS_BASE, BONITO_MEM_SIZE = 0x100000000, 0x7e2c0000              # upper bank only (safe)
+BONITO_WIDE_BASE, BONITO_WIDE_SIZE = 0xa2000000, 0x17e2c0000 - 0xa2000000  # after the memwalk passes
+BONITO_FB_H = 2160
 VTIMER_INTID = 19
 # QEMU virt (-M virt,gic-version=3 -cpu cortex-a76): GICD/GICR and the generic timer's CNTFRQ
 QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE = 0x08000000, 0x080a0000, 62500000
@@ -74,9 +79,14 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False):
+def build(seed=None, qemu=False, highmem=False, bonito=None):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
     phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
+    fb_h = FB_H
+    if bonito:  # 'upper' or 'wide'
+        phys_base, mem_size = ((BONITO_WIDE_BASE, BONITO_WIDE_SIZE) if bonito == 'wide'
+                               else (BONITO_PHYS_BASE, BONITO_MEM_SIZE))
+        fb_h = BONITO_FB_H
     # Carve the panic log off the top so the kernel never allocates over it.
     panic_base = phys_base + mem_size - PANIC_LOG_SIZE
     mem_size -= PANIC_LOG_SIZE
@@ -193,7 +203,7 @@ def build(seed=None, qemu=False, highmem=False):
         ph(),
         ('reg', u64(FB, FB_SIZE)),
         ('width', u32(FB_W)),
-        ('height', u32(FB_H)),
+        ('height', u32(fb_h)),
         ('stride', u32(FB_STRIDE)),
     ])
 
@@ -238,11 +248,12 @@ def build(seed=None, qemu=False, highmem=False):
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product + ([] if qemu else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product + ([] if qemu or bonito else [ufs]))
 
 
 if __name__ == '__main__':
-    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv)
+    bonito = 'wide' if '--bonito-wide' in sys.argv else 'upper' if '--bonito' in sys.argv else None
+    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv, bonito=bonito)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:
