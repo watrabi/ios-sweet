@@ -95,8 +95,16 @@ Three boots 2026-10-31:
    (58 GiB), PARTITION_CONFIG 0x38, CARD_TYPE 0x57, bus 1-bit legacy. GPT: 72 partitions.
    **userdata = LBA 17359872..122142686 (51163 MiB)**.
 - Card only ever received CMD0/1/2/3/9/7/13 + reads CMD8/CMD17.
-- Speed now: ~375 kHz 1-bit (~17 ms per block). For real use: 8-bit + HS52 via CMD6 (volatile EXT_CSD
-  BUS_WIDTH/HS_TIMING, not flash data) and SDHCI divider 4 (384/8 = 48 MHz) -> ~45 MB/s, or HS200 later.
+- Speed test (4th boot): CMD6 HS_TIMING=1 + host HS bit, SDHCI div 4 (384/8 = 48 MHz), CMD6 BUS_WIDTH=2 +
+  host 8-bit (hctl 0x0d34, clk 0x0e0407); GPT header re-read via CMD18 matches; **16 MiB CMD18 + ADMA
+  (64 KiB descriptors, auto-CMD12) in 367 ms = 43.5 MiB/s**. HS200 (~2x) is a later option.
+
+## XNU eMMC driver: patch 0082 (commit 4c9b9d8), not yet built
+- Transport inside sweet_ufs.c selected by ADT /sweet-emmc (mkadt --bonito); same sequence as the shim.
+- First test (read-only, safe): `ROOT=emmc tools/bonito-kernel-image.sh xnu/out/<new kernel> wide` ->
+  expect `SWEET EMMC: ... high speed 48 MHz, 8-bit bus` and `SWEET EMMC: "userdata" ... read-only`,
+  then a root mount failure (userdata holds no HFS yet).
+- Build: needs macos-14 window (Nov 1 00:00-14:00 UTC).
 
 ## Milestone 1 probe shim
 `shim/` now builds a probe (`shim/out/shim-boot.img`, ~1.4 MB):
