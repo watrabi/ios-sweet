@@ -1,9 +1,9 @@
 #!/bin/bash
 # Boot an existing SWEET XNU kernel on bonito with the tiny RAM-disk init as root.
 #   tools/bonito-kernel-image.sh KERNEL [upper|wide] [extra boot-args]
-# -> shim/out/shim-boot-xnu.img
+# -> shim/out/shim-boot-xnu.img   (then: fastboot boot shim/out/shim-boot-xnu.img)
 # ROOT=emmc: no RAM disk, root = userdata on eMMC (rd=ufsroot0, needs patch 0082);
-#   read-only unless the extra boot-args say ufsrw=1 rootrw=1.   (then: fastboot boot shim/out/shim-boot-xnu.img)
+#   read-only unless the extra boot-args say ufsrw=1 rootrw=1.
 #
 # Board drivers written for sweet are switched off: touch (Goodix + an RPMh
 # regulator vote that is a different rail on SDM670), SPMI keys (PM6150 layout)
