@@ -1,5 +1,6 @@
 /*
- * bonito GPU probe, stage 1 (shim, -DGPUPROBE): Adreno 615 on SDM670.
+ * bonito GPU probe, stages 1-2 (shim, -DGPUPROBE): Adreno 615 on SDM670.
+ * Stage 2 boots the GMU (legacy firmware a630_gmu.bin, see gmu_boot()).
  *
  * Port of ios-flame's shim/gpuprobe.c stage 1 (NWylynko/ios-flame, MIT;
  * written there for the Adreno 640 / SM8150). Powers only the GPU's CX
@@ -83,6 +84,298 @@ static void branch_on(const char *name, uintptr_t reg)
 	con_hex2(rc ? "  HALTED" : "  ok", "reg=", (uint32_t)reg, "val=", rd32(reg));
 }
 
+
+/* ---- stage 2: GMU boot (legacy GMU: A615/A630 family) ---- */
+
+#define SMMU_GR1	(SMMU + 0x1000)
+#define SMMU_CB(n)	(SMMU + 0x8000 + 0x1000UL * (n))
+#define SMR(n)		(SMMU + 0x800 + 4 * (n))
+#define S2CR(n)		(SMMU + 0xc00 + 4 * (n))
+#define CBAR(n)		(SMMU_GR1 + 4 * (n))
+#define CBA2R(n)	(SMMU_GR1 + 0x800 + 4 * (n))
+#define CB_SCTLR	0x00
+#define CB_TCR2		0x10
+#define CB_TTBR0	0x20
+#define CB_TCR		0x30
+#define CB_MAIR0	0x38
+#define CB_FSR		0x58
+#define CB_FAR		0x60
+#define CB_FSYNR0	0x68
+
+#define GMU_SID		5		/* sdm670.dtsi: gmu iommus = <&adreno_smmu 5> */
+#define GMU_SID_MASK	0x400
+
+/* GMU page tables + buffers: verified-free RAM (memwalk), 1 MiB. */
+#define GMEM		0x170000000UL
+#define GMEM_L1		(GMEM + 0x0000)
+#define GMEM_L2_1	(GMEM + 0x2000)		/* VA 0x40000000-0x7fffffff */
+#define GMEM_L3_6	(GMEM + 0x4000)		/* VA 0x60000000-0x601fffff */
+#define GMEM_DUMMY	(GMEM + 0x90000)
+#define GMEM_LOG	(GMEM + 0x91000)
+#define GMEM_HFI	(GMEM + 0x95000)
+#define GMEM_SIZE	0x100000UL
+#define VA_DUMMY	0x60000000u
+#define VA_LOG		0x60001000u
+#define VA_HFI		0x60005000u
+
+/* a6xx_gmu.c: rscc = gmu->mmio + 0x23000 before A650; sdm670.dtsi gmu_pdc / gmu_pdc_seq */
+#define RSCC		(0x0506a000UL + 0x23000)
+#define RSCC_REG(o)	(RSCC + 4UL * (o))
+#define PDC		0x0b280000UL
+#define PDC_REG(o)	(PDC + 4UL * (o))
+#define PDC_SEQ		0x0b480000UL
+#define PDC_ADDR_OFF	0x30080		/* A615: not A618/A640 (0x30090) */
+
+#define GMU_SYSRESET	0x1f800
+#define GMU_BOOT_CFG	0x1f801
+#define GMU_CM3_CFG	0x1f82d
+#define GMU_PWRCOL_CTRL	0x1f8c0
+#define GMU_RPMH_CTRL	0x1f8e8
+#define GMU_CP_MSG	0x1f900
+#define GMU_CP_RESP	0x1f901
+#define GMU_HFI_CTRL	0x1f980
+#define GMU_SFR_ADDR	0x1f982
+#define GMU_QTBL_INFO	0x1f984
+#define GMU_QTBL_ADDR	0x1f985
+#define GMU_SYS_BUS	0x1f40f
+#define GMU_ICACHE_CFG	0x1f400
+#define GMU_DCACHE_CFG	0x1f401
+#define GMU_RSCC_REQ	0x23b07
+#define GMU_RSCC_ACK	0x23b08
+#define GMU_FENCE0	0x23b11
+#define GMU_CHIPID	0x06015000u	/* chip 0x06010500 in the GMU's packing */
+
+extern const uint8_t gmu_fw[], gmu_fw_end[];
+
+/* PC-relative address of an embedded symbol: keeps the compiler from folding
+ * symbol arithmetic into an absolute literal (the shim is not relocated). */
+#define PCREL(sym) ({ const uint8_t *_p; \
+	__asm__("adrp %0, " #sym "\n\tadd %0, %0, :lo12:" #sym : "=r"(_p)); _p; })
+
+static void zero32(uintptr_t pa, uint64_t size)
+{
+	for (uint64_t o = 0; o < size; o += 4)
+		*(volatile uint32_t *)(pa + o) = 0;
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+
+static void wr64(uintptr_t pa, uint64_t v)
+{
+	wr32(pa, (uint32_t)v);
+	wr32(pa + 4, (uint32_t)(v >> 32));
+}
+
+/* Stage-1 AArch64 4K page: AF, inner shareable, AttrIndx 0, AP=01 (data). */
+static void map_pages(uintptr_t l3, uint32_t va, uintptr_t pa, uint32_t size)
+{
+	for (uint32_t o = 0; o < size; o += 0x1000) {
+		uint32_t idx = ((va + o) >> 12) & 0x1ff;
+		wr64(l3 + 8 * idx, (pa + o) | (1u << 10) | (3u << 8) | (1u << 6) | 3u);
+	}
+}
+
+static int smmu_setup(void)
+{
+	uint32_t nsmr = rd32(SMMU + 0x20) & 0xff, ncb = rd32(SMMU + 0x24) & 0xff;
+	int smr = -1, cb = -1;
+	uint32_t used_cb = 0;
+	con_hex2("SMMU", "nsmr=", nsmr, "ncb=", ncb);
+	for (uint32_t i = 0; i < nsmr && i < 16; i++) {
+		uint32_t m = rd32(SMR(i)), c = rd32(S2CR(i));
+		con_hex2(" smr", "smr=", m, "s2cr=", c);
+		if ((m >> 31) && ((c >> 16) & 3) == 0)
+			used_cb |= 1u << (c & 0xff);
+		if (smr < 0 && !(m >> 31))
+			smr = (int)i;
+	}
+	for (uint32_t i = 0; i < ncb && i < 16; i++)
+		if (cb < 0 && !(used_cb & (1u << i)) && !(rd32(SMMU_CB(i) + CB_SCTLR) & 1))
+			cb = (int)i;
+	con_hex2(" use", "smr=", (uint32_t)smr, "cb=", (uint32_t)cb);
+	if (smr < 0 || cb < 0)
+		return -1;
+
+	zero32(GMEM, GMEM_SIZE);
+	wr64(GMEM_L1 + 8, GMEM_L2_1 | 3);
+	wr64(GMEM_L2_1 + 8 * ((VA_DUMMY >> 21) & 0x1ff), GMEM_L3_6 | 3);
+	map_pages(GMEM_L3_6, VA_DUMMY, GMEM_DUMMY, 0x1000);
+	map_pages(GMEM_L3_6, VA_LOG, GMEM_LOG, 0x4000);
+	map_pages(GMEM_L3_6, VA_HFI, GMEM_HFI, 0x4000);
+
+	uintptr_t c = SMMU_CB(cb);
+	wr32(c + CB_SCTLR, 0);
+	wr32(CBA2R(cb), 1);						/* AArch64 */
+	wr32(CBAR(cb), (1u << 16) | (0xfu << 12) | (3u << 8) | ((uint32_t)cb + 1));
+	wr32(c + CB_TCR2, 2);						/* 40-bit PA */
+	wr64(c + CB_TTBR0, GMEM_L1);
+	wr32(c + CB_TCR, 32 | (1u << 8) | (1u << 10) | (3u << 12) | (1u << 23));
+	wr32(c + CB_MAIR0, 0x0000ff44);
+	wr32(c + CB_FSR, 0xffffffff);
+	wr32(c + CB_SCTLR, 1 | 2 | 4 | 0x20 | 0x40);
+	wr32(SMMU + 0x68, 0);						/* TLBIALLNSNH */
+	wr32(SMMU + 0x70, 0);						/* TLBGSYNC */
+	wait_bit(SMMU + 0x74, 1, 0, 10);
+	wr32(S2CR(smr), (uint32_t)cb);
+	wr32(SMR(smr), (1u << 31) | (GMU_SID_MASK << 16) | GMU_SID);
+	con_hex2(" now", "smr=", rd32(SMR(smr)), "sctlr=", rd32(c + CB_SCTLR));
+	return cb;
+}
+
+/* a6xx_gmu_rpmh_init for a non-A618 A6xx gen1 (A615): PDC offset 0x30080. */
+static void rpmh_init(void)
+{
+	con_hex2("RSCC", "status0=", rd32(RSCC_REG(0x0004)), "seqbusy=", rd32(RSCC_REG(0x0101)));
+	wr32(RSCC_REG(0x0004), 1u << 24);
+	wr32(RSCC_REG(0x000b), 1);
+	wr32(RSCC_REG(0x000e), 0);
+	wr32(RSCC_REG(0x000d), 0);
+	wr32(RSCC_REG(0x000e + 2), 0);
+	wr32(RSCC_REG(0x000d + 2), 0);
+	wr32(RSCC_REG(0x000e + 4), 0x80000000);
+	wr32(RSCC_REG(0x000d + 4), 0);
+	wr32(RSCC_REG(0x0100), 0);
+	wr32(RSCC_REG(0x0008), 0x4520);
+	wr32(RSCC_REG(0x0009), 0x4510);
+	wr32(RSCC_REG(0x000a), 0x4514);
+	wr32(RSCC_REG(0x0180), 0xa7a506a0);
+	wr32(RSCC_REG(0x0181), 0xa1e6a6e7);
+	wr32(RSCC_REG(0x0182), 0xa2e081e1);
+	wr32(RSCC_REG(0x0183), 0xe9a982e2);
+	wr32(RSCC_REG(0x0184), 0x0020e8a8);
+
+	con_str("STEP", "PDC (0xb280000) / PDC_SEQ (0xb480000)");
+	con_hex2("PDC", "enable=", rd32(PDC_REG(0x1140)), 0, 0);
+	wr32(PDC_SEQ + 0, 0xfebea1e1);
+	wr32(PDC_SEQ + 4, 0xa5a4a3a2);
+	wr32(PDC_SEQ + 8, 0x8382a6e0);
+	wr32(PDC_SEQ + 12, 0xbce3e284);
+	wr32(PDC_SEQ + 16, 0x002081fc);
+
+	wr32(PDC_REG(0x1573), 7);
+	wr32(PDC_REG(0x1574), 0);
+	wr32(PDC_REG(0x1572), 0);
+	wr32(PDC_REG(0x1575), 0x10108);
+	wr32(PDC_REG(0x1576), 0x30010);
+	wr32(PDC_REG(0x1577), 1);
+	wr32(PDC_REG(0x1575 + 4), 0x10108);
+	wr32(PDC_REG(0x1576 + 4), 0x30000);
+	wr32(PDC_REG(0x1577 + 4), 0);
+	wr32(PDC_REG(0x1575 + 8), 0x10108);
+	wr32(PDC_REG(0x1576 + 8), PDC_ADDR_OFF);
+	wr32(PDC_REG(0x1577 + 8), 0);
+
+	wr32(PDC_REG(0x15d7), 7);
+	wr32(PDC_REG(0x15d8), 0);
+	wr32(PDC_REG(0x15d6), 0);
+	wr32(PDC_REG(0x15d9), 0x10108);
+	wr32(PDC_REG(0x15da), 0x30010);
+	wr32(PDC_REG(0x15db), 2);
+	wr32(PDC_REG(0x15d9 + 4), 0x10108);
+	wr32(PDC_REG(0x15da + 4), 0x30000);
+	wr32(PDC_REG(0x15db + 4), 3);
+	wr32(PDC_REG(0x15d9 + 8), 0x10108);
+	wr32(PDC_REG(0x15da + 8), PDC_ADDR_OFF);
+	wr32(PDC_REG(0x15db + 8), 3);
+
+	wr32(PDC_REG(0x1148), 0);
+	wr32(PDC_REG(0x1140), 0x80000001);
+}
+
+static void hfi_table(void)
+{
+	uintptr_t t = GMEM_HFI;
+	wr32(t + 0, 0);
+	wr32(t + 4, 6 * 4 + 3 * 12 * 4);
+	wr32(t + 8, 6);
+	wr32(t + 12, 12);
+	wr32(t + 16, 3);
+	wr32(t + 20, 3);
+	for (int q = 0; q < 3; q++) {
+		uintptr_t h = t + 24 + 48 * (uintptr_t)q;
+		wr32(h + 0, 1);
+		wr32(h + 4, VA_HFI + 0x1000u * (uint32_t)(q + 1));
+		wr32(h + 8, (10u << 8) | (uint32_t)q);
+		wr32(h + 12, 0x1000 >> 2);
+		wr32(h + 24, 1);
+		wr32(h + 28, 1);
+		wr32(h + 32, 1);
+	}
+}
+
+static void gmu_boot(void)
+{
+	con_line("GPU stage 2  GMU boot (legacy, a630_gmu.bin)", GREEN);
+	con_str("STEP", "SMMU context bank for GMU stream 5");
+	int cb = smmu_setup();
+	if (cb < 0) {
+		con_str("SMMU", "no free SMR/context bank - stop");
+		return;
+	}
+	con_str("STEP", "RSCC (0x508d000)");
+	rpmh_init();
+	hfi_table();
+
+	con_str("STEP", "RSC wake");
+	wr32(GMU_REG(GMU_GENERAL_7), 1);
+	wr32(GMU_REG(GMU_RSCC_REQ), 1u << 1);
+	int rc = wait_bit(GMU_REG(GMU_RSCC_ACK), 1u << 1, 1, 200);
+	int rc2 = wait_bit(RSCC_REG(0x0101), 0xffffffff, 0, 10);
+	wr32(GMU_REG(GMU_RSCC_REQ), 0);
+	con_hex2(rc ? " ack TIMEOUT" : " ack ok", "ack=", rd32(GMU_REG(GMU_RSCC_ACK)), "pdc=", rd32(PDC_REG(0x1140)));
+	con_hex2(rc2 ? " seq BUSY" : " seq idle", "status0=", rd32(RSCC_REG(0x0004)), 0, 0);
+
+	/* legacy: the whole image is ITCM content (<= 32 KiB) */
+	const uint8_t *fw = PCREL(gmu_fw), *fw_end = PCREL(gmu_fw_end);
+	uint32_t size = (uint32_t)(fw_end - fw);
+	con_hex2("FW", "size=", size, "first=", *(const uint32_t *)fw);
+	if (size == 0 || size > 0x8000)
+		return;
+	for (uint32_t o = 0; o < size; o += 4)
+		wr32(GMU_REG(GMU_ITCM) + o, *(const volatile uint32_t *)(fw + o));
+	con_hex2(" itcm", "[0]=", rd32(GMU_REG(GMU_ITCM)), "[1]=", rd32(GMU_REG(GMU_ITCM) + 4));
+
+	wr32(GMU_REG(GMU_INIT_RESULT), 0);
+	wr32(GMU_REG(GMU_BOOT_CFG), 2);
+	wr32(GMU_REG(GMU_QTBL_ADDR), VA_HFI);
+	wr32(GMU_REG(GMU_QTBL_INFO), 1);
+	wr32(GMU_REG(GMU_FENCE0), (1u << 31) | (0xau << 18) | 0xa0);
+	wr32(GMU_REG(GMU_CM3_CFG), 0x4052);
+	wr32(GMU_REG(GMU_SFR_ADDR), GMU_CHIPID);
+	wr32(GMU_REG(GMU_CP_MSG), VA_LOG | (0x4000 / 0x1000 - 1));
+	/* a6xx_gmu_power_config: no IFPC, RPMh interface + votes on */
+	wr32(GMU_REG(GMU_SYS_BUS), 1);
+	wr32(GMU_REG(GMU_ICACHE_CFG), 1);
+	wr32(GMU_REG(GMU_DCACHE_CFG), 1);
+	wr32(GMU_REG(GMU_PWRCOL_CTRL), 0x9c40400);
+	wr32(GMU_REG(GMU_RPMH_CTRL), rd32(GMU_REG(GMU_RPMH_CTRL)) |
+	     1 | (1u << 4) | (1u << 8) | (1u << 9) | (1u << 10) | (1u << 11));
+
+	uint32_t v = rd32(GMU_REG(GMU_DTCM) + 0xff8 * 4);
+	uint32_t mask = v <= 0x20010004 ? 0xffffffff : 0x1ff;
+	uint32_t want = v <= 0x20010004 ? 0xbabeface : 0x100;
+	con_hex2("CM3", "dtcm[ff8]=", v, "want=", want);
+	con_str("STEP", "releasing CM3 reset");
+	wr32(GMU_REG(GMU_SYSRESET), 1);
+	wr32(GMU_REG(GMU_CP_RESP), 0);
+	wr32(GMU_REG(GMU_SYSRESET), 0);
+	uint32_t r = 0;
+	int ok = 0;
+	for (int i = 0; i < 2000; i++) {
+		r = rd32(GMU_REG(GMU_INIT_RESULT));
+		if ((r & mask) == want) {
+			ok = 1;
+			break;
+		}
+		mdelay(1);
+	}
+	uintptr_t c = SMMU_CB(cb);
+	con_hex2(ok ? "GMU BOOTED" : "GMU TIMEOUT", "init=", r, "hfi=", rd32(GMU_REG(GMU_HFI_CTRL)));
+	con_hex2(" fw", "version=", rd32(GMU_REG(GMU_FW_VERSION)), "rpmh=", rd32(GMU_REG(GMU_RPMH_STATE)));
+	con_hex2(" cb", "fsr=", rd32(c + CB_FSR), "far=", rd32(c + CB_FAR));
+	con_hex2(" cb", "fsynr0=", rd32(c + CB_FSYNR0), "gfsr=", rd32(SMMU + 0x48));
+	con_hex2(" log", "[0]=", rd32(GMEM_LOG), "[1]=", rd32(GMEM_LOG + 4));
+}
+
 void gpu_probe(void)
 {
 	con_line("GPU PROBE stage 1  Adreno 615: CX power, GMU regs, SMMU", GREEN);
@@ -134,5 +427,8 @@ void gpu_probe(void)
 	con_hex2(" smmu", "idr1=", rd32(SMMU + 0x24), "idr2=", rd32(SMMU + 0x28));
 	con_hex2(" smmu", "idr7=", rd32(SMMU + 0x3c), 0, 0);
 
-	con_str("GPU", "stage 1 done - nothing ran on the GPU");
+	con_str("GPU", "stage 1 done");
+	con_skip();
+	gmu_boot();
+	con_str("GPU", "probe done - no GPU commands were run");
 }

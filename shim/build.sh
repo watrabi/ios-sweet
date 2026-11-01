@@ -14,7 +14,7 @@ DTB=${DTB:-../dtb/bonito-stock.dtb}
 KCOMP=${KCOMP:-lz4}
 CFLAGS="${EXTRA_CFLAGS:-} -O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra"
 mkdir -p out
-for f in start.S shim.c console.c mmu.c fdt.c loader.c emmc.c touch.c gpu.c; do
+for f in start.S shim.c console.c mmu.c fdt.c loader.c emmc.c touch.c gpu.c gpu_fw.S; do
 	$CC $CFLAGS -c $f -o out/${f%.*}.o
 done
 # The image runs wherever ABL puts it with no relocation pass: only the
@@ -22,7 +22,7 @@ done
 abs=$(${CROSS}readelf -r out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/emmc.o out/touch.o out/gpu.o | grep -c ABS64 || true)
 [ "$abs" = 0 ] || { echo "error: $abs absolute relocations in C objects" >&2; exit 1; }
 $CC $CFLAGS -static -T shim.ld -Wl,--build-id=none -Wl,--no-warn-rwx-segments -Wl,-N \
-	out/start.o out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/emmc.o out/touch.o out/gpu.o -o out/shim.elf
+	out/start.o out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/emmc.o out/touch.o out/gpu.o out/gpu_fw.o -o out/shim.elf
 $OBJCOPY -O binary out/shim.elf out/Image
 # ABL copies the file; pad to image_size so .bss/stacks exist as zeroed bytes.
 size=$(${CROSS}nm out/shim.elf | awk '$3=="_end"{print strtonum("0x"$1)}')
