@@ -293,3 +293,21 @@ Metal, in order:
 2. Kernel: flame 0096, 0097, 0115 and 0116, plus the GPU fixes 0104–0109, 0113 and 0117–0119.
 3. macOS CI: Turnip for iOS (A615 is gen1), the metal2vulkan bridge, and SweetMetal2.bundle.
 4. Install the bundle and boot with sweetmtl=2. Speed also needs a GPU frequency vote and a DDR bandwidth vote (the GMU HFI fault blocks these).
+
+### USB, file server, AMFI, Metal (2026-11-01)
+- **0087** (tested): USB Ethernet works (phone 192.168.7.2; `tools/bonito-usbnet.sh` sets the host side and keeps NetworkManager off the link).
+  - The QUSB2 PHY must be re-initialised (Linux qusb2_phy_init v2 table + GCC_QUSB2PHY_PRIM_BCR 0x12000). ABL powers it down on hand-over, and the first ep0 command then timed out.
+  - Other bonito specifics: SMMU stream 0x740, already matched by ABL's SMR4 (used as is); sdm845 GCC CBCR offsets.
+  - File server on tcp 2223 (`tools/bonito-files.py` get/put/mkdir/rm/chmod/link, plus list since rev 2); paths are percent-encoded (spaces).
+  - Command server on udp 5141 (`tools/bonito-cmd.py sync|reboot|<poke lines>`), and a live log on udp 5140.
+  - SweetAMFI answers trust-cache queries (verified in the log). The ADT carries the wifi/bt/ethernet MACs.
+- Wallpaper: 4 of the 5 WWDC 2022 HEIC layers have been replaced with PNG on the phone. "Head Mask" (space in the name) needs 0087 rev 2: run `tools/bonito-wallpaper.sh`.
+- **0088** (built, untested): ios-flame 0096–0118 (SweetAccelerator v1/v2, the NativeAdreno ABI for Turnip's darwin backend, recovery, async submits, ...).
+  - A615 values: chip id 0x06010500, GMEM 512 KB, hbb 14.
+  - v2 BOs come from a pool carved off the top of RAM. `mkadt.py --gpupool 512` puts it in /chosen sweet-gpu-pool; it is 0x15e2c0000 + 512 MB with --bonito-wide.
+  - Skipped: 0107, 0110–0112, 0114 (dyld policy, needed for third-party apps), 0119, 0120, 0122.
+- **Userland Metal** (.github/workflows/metal.yml, macos-15; built OK): Mesa 85fda3b3 + UniXNU e19e517 patches/mesa + flame 0100, metal2vulkan 720ef1ce + flame bridge patches, and SweetMetal2.bundle (TU_DEBUG=noubwc forced: UBWC is unconfigured on our A615).
+  - Install: `tools/bonito-metal-install.sh` (phone up with USB=2). Then boot `METAL=1` (sweetmtl=2).
+  - Images: /mnt/iosbuild/boot/shim-boot-0088-{metal,nometal}.img.
+- Root disk is full (≤80 MB). Kernel artifacts are downloaded into the scratchpad (RAM), boot images go to /mnt/iosbuild/boot.
+- CI: macOS 14 brownouts have started. The xnu workflow default is now macos-15.
