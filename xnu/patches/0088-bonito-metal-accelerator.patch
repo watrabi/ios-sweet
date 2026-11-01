@@ -378,7 +378,7 @@ index ab6da99..522e301 100644
  	while (off < size) {
  		size_t chunk = (size_t)MIN((uint64_t)SF_BUF, size - off);
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
-index c61ce00..064b6c7 100644
+index c61ce00..27229ec 100644
 --- a/bsd/dev/sweet_gpu.c
 +++ b/bsd/dev/sweet_gpu.c
 @@ -46,9 +46,11 @@ void sweet_gpu_init(void);
@@ -491,7 +491,41 @@ index c61ce00..064b6c7 100644
  void
  a6_log(const char *fmt, ...)
  {
-@@ -296,6 +342,10 @@ sweet_gpu_init(void)
+@@ -265,9 +311,33 @@ a6_firmware(const char *name, uint32_t *len)
+ 
+ /* ---- bring-up ---- */
+ 
++int sweet_rpmh_write(const char *res, unsigned n, const uint32_t *offsets, const uint32_t *values);
++
++/*
++ * DDR (BCM MC0) and the memory NoC (SH0) at their top levels (ios-flame 0122): nothing else votes them
++ * for the GPU, so ABL's level stays. BCM command: commit | valid | x (avg) | y (peak).
++ * Boot-arg sweetddr=0 leaves them alone. bonito: same BCM names in the SDM670 cmd-db.
++ */
++static void
++gpu_bus_vote(void)
++{
++	uint32_t on = 1;
++	PE_parse_boot_argn("sweetddr", &on, sizeof(on));
++	if (!on) {
++		return;
++	}
++	static const char *const bcm[] = { "MC0", "SH0" };
++	for (unsigned i = 0; i < sizeof(bcm) / sizeof(bcm[0]); i++) {
++		uint32_t off = 0, val = 1u << 30 | 1u << 29 | 0x3fffu << 14 | 0x3fffu;
++		int rc = sweet_rpmh_write(bcm[i], 1, &off, &val);
++		a6_log("bus vote %s top -> %d\n", bcm[i], rc);
++	}
++}
++
+ static void
+ gpu_thread(void *arg __unused, wait_result_t wr __unused)
+ {
++	gpu_bus_vote();
+ 	if (gpu_dbg) {
+ 		a6_log("debug: bring-up in %u s\n", gpu_dbg);
+ 		IOSleep(gpu_dbg * 1000);
+@@ -296,6 +366,10 @@ sweet_gpu_init(void)
  		return;
  	}
  	PE_parse_boot_argn("sweetgpudbg", &gpu_dbg, sizeof(gpu_dbg));
@@ -502,7 +536,7 @@ index c61ce00..064b6c7 100644
  	vm_offset_t va = 0;
  	if (kmem_alloc_contig(kernel_map, &va, A6_POOL_SIZE, PAGE_MASK, 0, (ppnum_t)(atop_64(A6_POOL_ALIGN) - 1),
  	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
-@@ -305,7 +355,15 @@ sweet_gpu_init(void)
+@@ -305,7 +379,15 @@ sweet_gpu_init(void)
  	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)va);
  	a6_init_state(&gpu, ptoa_64(pn));
  	pool_kva = va;
@@ -519,7 +553,7 @@ index c61ce00..064b6c7 100644
  	thread_t thread;
  	if (kernel_thread_start(gpu_thread, NULL, &thread) == KERN_SUCCESS) {
  		thread_deallocate(thread);
-@@ -318,6 +376,107 @@ sweet_gpu_ready(void)
+@@ -318,6 +400,107 @@ sweet_gpu_ready(void)
  	return gpu_ready;
  }
  
@@ -627,7 +661,7 @@ index c61ce00..064b6c7 100644
  /* ---- the panel ---- */
  
  /*
-@@ -422,18 +581,19 @@ static uint64_t stat_frames, stat_clean_abs, stat_gpu_abs;
+@@ -422,18 +605,19 @@ static uint64_t stat_frames, stat_clean_abs, stat_gpu_abs;
  /*
   * Blit a mapped surface, scaled to fit and centred, into the panel memory
   * (rows of fb_pitch bytes). The CPU rendered it through the cache: clean
@@ -651,7 +685,7 @@ index c61ce00..064b6c7 100644
  	}
  	uint64_t t1 = mach_absolute_time();
  
-@@ -455,14 +615,20 @@ sweet_gpu_present(int s, uint32_t offset, uint32_t w, uint32_t h, uint32_t pitch
+@@ -455,14 +639,20 @@ sweet_gpu_present(int s, uint32_t offset, uint32_t w, uint32_t h, uint32_t pitch
  	lck_mtx_lock(&sweet_gpu_lock);
  	uint32_t n = a6_blit_ib(&gpu, &b, dw);
  	a6_write(a6_pool_pa(&gpu, IB_OFF), dw, 4ULL * n);
@@ -680,7 +714,7 @@ index c61ce00..064b6c7 100644
  	}
  	lck_mtx_unlock(&sweet_gpu_lock);
  	uint64_t t2 = mach_absolute_time();
-@@ -480,4 +646,446 @@ sweet_gpu_present(int s, uint32_t offset, uint32_t w, uint32_t h, uint32_t pitch
+@@ -480,4 +670,446 @@ sweet_gpu_present(int s, uint32_t offset, uint32_t w, uint32_t h, uint32_t pitch
  	*out_dw = b.dw;
  	return rc;
  }
@@ -1127,6 +1161,161 @@ index c61ce00..064b6c7 100644
 +	return gpu_ready ? a6_timestamp(&gpu) : 0;
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
+index 4da50d8..c9f6e36 100644
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -9,13 +9,17 @@
+ #include <sys/errno.h>
+ #include <kern/clock.h>
+ #include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++#include <libkern/libkern.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
+ 
+ /* Live downstream DT has two positional reg entries, no reg-names. */
+-#define RH_RSC_PA       0x18220000u
+-#define RH_TCS_PA       0x18220d00u
++/* sweet (SM7150); bonito (SDM670 apps_rsc DRV2 0x179e0000, tcs-offset 0xd00) set at map time */
++static uint32_t RH_RSC_PA = 0x18220000u;
++static uint32_t RH_TCS_PA = 0x18220d00u;
+ #define RH_TCS_SIZE     0x3000u
+ #define RH_DICT_PA      0x0c3f000cu
+ #define RH_DRV          2u
+@@ -44,6 +48,8 @@ int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
+ #define RH_DB_ENTRY     24u
+ #define RH_DB_MAX       0x100000u /* policy bound, not a DT size */
+ #define RH_VRM          4u
++#define RH_ARC          3u
++#define RH_BCM          5u
+ #define RH_TIMEOUT_US   100000u
+ 
+ static vm_offset_t rh_rsc, rh_tcs, rh_dict, rh_db;
+@@ -101,6 +107,15 @@ static int
+ rh_map(void)
+ {
+ 	if (!rh_rsc) {
++		DTEntry chosen;
++		void const *board;
++		unsigned int bsize;
++		if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
++		    SecureDTGetProperty(chosen, "sweet-board", &board, &bsize) == kSuccess &&
++		    bsize >= 6 && strncmp((const char *)board, "bonito", 6) == 0) {
++			RH_RSC_PA = 0x179e0000u;
++			RH_TCS_PA = 0x179e0d00u;
++		}
+ 		rh_rsc = ml_io_map(RH_RSC_PA, 0x100);
+ 	}
+ 	if (!rh_tcs) {
+@@ -186,9 +201,9 @@ rh_lookup(const char *res, uint32_t *address)
+ 				continue;
+ 			}
+ 			uint32_t addr = rh_read(rh_db, e + 16);
+-			if (slave != RH_VRM || (addr >> 16) != RH_VRM || (addr & 15u) ||
++			if ((slave != RH_VRM && slave != RH_ARC && slave != RH_BCM) || (addr >> 16) != slave || (addr & 3u) ||
+ 			    !rh_range(aux + rh_db16(e + 22), rh_db16(e + 20))) {
+-				printf("SWEET RPMH: invalid VRM entry for %s\n", res);
++				printf("SWEET RPMH: invalid VRM/ARC/BCM entry for %s\n", res);
+ 				return EINVAL;
+ 			}
+ 			*address = addr;
+@@ -219,7 +234,7 @@ rh_free(unsigned t)
+ }
+ 
+ static int
+-rh_send(uint32_t address, unsigned mv)
++rh_send_cmds(uint32_t address, unsigned n, const uint32_t *offsets, const uint32_t *values)
+ {
+ 	int chosen = -1;
+ 	for (unsigned t = 0; t < RH_ACTIVE_N; ++t) {
+@@ -266,11 +281,10 @@ rh_send(uint32_t address, unsigned mv)
+ 	}
+ 	/* From here an uncertain write/timeout quarantines our slot for this boot. */
+ 	rh_poisoned = true;
+-	/* HPM (raw 7) is supported by this PMIC5 LDO; enable comes last. */
+-	const uint32_t offsets[3] = {0, 8, 4};
+-	const uint32_t values[3] = {mv, 7, 1};
+-	printf("SWEET RPMH: TCS%u ACTIVE %u mV mode=7 enable=1 irq-enable=%#x\n", t, mv, irq_en);
+-	for (unsigned c = 0; c < 3; ++c) {
++	uint32_t mask = (1u << n) - 1u;
++	printf("SWEET RPMH: TCS%u ACTIVE %u commands at %#x (first %#x=%u) irq-enable=%#x\n", t, n, address,
++	    offsets[0], values[0], irq_en);
++	for (unsigned c = 0; c < n; ++c) {
+ 		uint32_t cmd = b + c * RH_CMD_STRIDE;
+ 		if (!rh_sync(cmd + RH_MSGID, RH_WRITE_ACK) ||
+ 		    !rh_sync(cmd + RH_ADDR, address + offsets[c]) ||
+@@ -278,18 +292,18 @@ rh_send(uint32_t address, unsigned mv)
+ 			return EIO;
+ 		}
+ 	}
+-	if (!rh_sync(b + RH_WAIT, 7) || !rh_sync(b + RH_ENABLE, 7) ||
++	if (!rh_sync(b + RH_WAIT, mask) || !rh_sync(b + RH_ENABLE, mask) ||
+ 	    !rh_sync(b + RH_CONTROL, 0) || !rh_sync(b + RH_CONTROL, RH_AMC_EN)) {
+ 		return EIO;
+ 	}
+ 	rh_write(rh_tcs, b + RH_CONTROL, RH_AMC_EN | RH_TRIGGER);
+-	uint32_t irq = 0, idle = 0, status[3] = {0, 0, 0};
++	uint32_t irq = 0, idle = 0, status[4] = {0, 0, 0, 0};
+ 	bool done = false, progress = false;
+ 	for (unsigned us = 0; us < RH_TIMEOUT_US; ++us) {
+ 		irq = rh_read(rh_tcs, RH_IRQ_STATUS);
+ 		idle = rh_read(rh_tcs, b + RH_STATUS);
+ 		bool complete = true;
+-		for (unsigned c = 0; c < 3; ++c) {
++		for (unsigned c = 0; c < n; ++c) {
+ 			status[c] = rh_read(rh_tcs, b + RH_CMD_STATUS + c * RH_CMD_STRIDE);
+ 			complete &= status[c] != 0xffffffffu &&
+ 			    (status[c] & (RH_ISSUED | RH_COMPLETE)) == (RH_ISSUED | RH_COMPLETE);
+@@ -324,6 +338,46 @@ rh_send(uint32_t address, unsigned mv)
+ 	return 0;
+ }
+ 
++static int
++rh_send(uint32_t address, unsigned mv)
++{
++	/* HPM (raw 7) is supported by this PMIC5 LDO; enable comes last. */
++	const uint32_t offsets[3] = {0, 8, 4};
++	const uint32_t values[3] = {mv, 7, 1};
++	return rh_send_cmds(address, 3, offsets, values);
++}
++
++/*
++ * Any VRM, ARC or BCM resource, 1-4 commands (offset from the resource address,
++ * value): for /dev/pmem's PMEM_RPMH (userland bring-up of the modem and
++ * WLAN: ARC levels of cx/mss, WLAN rails). No policy: a debugging path.
++ */
++int sweet_rpmh_write(const char *res, unsigned n, const uint32_t *offsets, const uint32_t *values);
++
++int
++sweet_rpmh_write(const char *res, unsigned n, const uint32_t *offsets, const uint32_t *values)
++{
++	if (!res || n == 0 || n > 4) {
++		return EINVAL;
++	}
++	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
++		return EBUSY;
++	}
++	int error = EIO;
++	uint32_t address = 0;
++	if (!rh_poisoned) {
++		error = rh_map();
++		if (!error) {
++			error = rh_lookup(res, &address);
++		}
++		if (!error) {
++			error = rh_send_cmds(address, n, offsets, values);
++		}
++	}
++	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
++	return error;
++}
++
+ int
+ sweet_rpmh_vreg_enable(const char *res, unsigned mv)
+ {
 diff --git a/iokit/Kernel/arm/SweetAccelerator.cpp b/iokit/Kernel/arm/SweetAccelerator.cpp
 new file mode 100644
 index 0000000..b258540
