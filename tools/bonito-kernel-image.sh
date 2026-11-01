@@ -4,6 +4,7 @@
 # -> shim/out/shim-boot-xnu.img   (then: fastboot boot shim/out/shim-boot-xnu.img)
 # ROOT=emmc: no RAM disk, root = userdata on eMMC (rd=ufsroot0, needs patch 0082);
 #   read-only unless the extra boot-args say ufsrw=1 rootrw=1.
+# TOUCH=1: keep the touch driver on (bonito RMI4, patch 0084).
 #
 # Board drivers written for sweet are switched off: touch (Goodix + an RPMh
 # regulator vote that is a different rail on SDM670), SPMI keys (PM6150 layout)
@@ -27,7 +28,9 @@ python3 tools/mkadt.py $O/bonito-$MEM.adt $flag 2>/dev/null
 
 if [ "${ROOT:-md}" = emmc ]; then RD=rd=ufsroot0; RDARG=(); else RD=rd=md0; RDARG=(--ramdisk $O/sweet-init); fi
 ARGS="debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress $RD"
-ARGS="$ARGS sweettouch=0 sweetkeys=0 sweetusb=0 wdt=-1 wdt_test=no_user_checkin $EXTRA"
+# TOUCH=1: enable the bonito RMI4 touch driver (patch 0084); keys/USB stay off.
+if [ "${TOUCH:-0}" = 1 ]; then TOUCHARG=""; else TOUCHARG="sweettouch=0 "; fi
+ARGS="$ARGS ${TOUCHARG}sweetkeys=0 sweetusb=0 wdt=-1 wdt_test=no_user_checkin $EXTRA"
 python3 tools/mkpayload.py "$K" $O/bonito-$MEM.adt $O/payload-xnu.bin "${RDARG[@]}" --cmdline "$ARGS"
 (cd shim && ./build.sh ../$O/payload-xnu.bin >/dev/null)
 mv $O/shim-boot.img $O/shim-boot-xnu.img
