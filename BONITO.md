@@ -237,5 +237,11 @@ Run (after the user unlocks the bootloader - `fastboot flashing unlock` WIPES An
   * Remaining difference from mainline: no interconnect (GFX3D->EBI1) bandwidth vote. GX stays powered
     after the fault. Plan: skip HFI and try stage 4-5 (zap via SCM PAS id 13 into gpu_region 0x97a15000,
     SQE, ring, CP_ME_INIT, CP_MEM_WRITE 0xcafef00d) like ios-flame's gpu_run; return to the fault later.
+- **STAGE 4-5: THE GPU EXECUTES COMMANDS** (shim-gpu45.img, commit 5bbbde3, 2026-11-01 ~03:10 UTC):
+  HFI messages skipped (GX already on), OOB GPU_SET, GPU stream SMR1 = 0x80000000 (sid 0, no mask) -> CB1,
+  A615 gen1 hw_init (VBIF QoS, ROQ 0x010000c0/0x8040362c, pool 128, PC_DBG_ECO 0x18000, GMEM 1M+512K),
+  a630_sqe.fw (0x7d84 B) at CP_SQE_INSTR_BASE 0x830, 32K ring, CP_ME_INIT idle (rptr = wptr = 9);
+  zap via SCM PAS 13: supported / INIT_IMAGE / MEM_SETUP(0x97a15000, 0x2000) / AUTH_AND_RESET all rc 0;
+  CP_SET_SECURE_MODE 0; **CP_MEM_WRITE -> target = 0xcafef00d**; no SMMU fault (FSR 0x400, FAR 0).
 - Earlier plan for stage 3: then gfx_rail_on + sptprac_enable, legacy HFI
   (v1) start, OOB GPU set -> GX GDSC on; then zap shader (TZ PAS, a615_zap), SQE, ring, first commands.
