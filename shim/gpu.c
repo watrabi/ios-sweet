@@ -149,6 +149,7 @@ static void branch_on(const char *name, uintptr_t reg)
 
 extern const uint8_t gmu_fw[], gmu_fw_end[];
 static void gmu_power_up(void);
+static void crumb(const char *what);
 
 /* PC-relative address of an embedded symbol: keeps the compiler from folding
  * symbol arithmetic into an absolute literal (the shim is not relocated). */
@@ -308,6 +309,7 @@ static void hfi_table(void)
 
 static void gmu_boot(void)
 {
+	crumb("stage 2 GMU boot");
 	con_line("GPU stage 2  GMU boot (legacy, a630_gmu.bin)", GREEN);
 	con_str("STEP", "SMMU context bank for GMU stream 5");
 	int cb = smmu_setup();
@@ -411,6 +413,35 @@ static const uint32_t gmu_khz[2] = { 0, 200000 };
 static const uint32_t gmu_lvl[2] = { 0, 48 /* MIN_SVS */ };
 
 static uint32_t hfi_seq;
+
+/*
+ * Breadcrumb in RAM that survives a warm reset (memwalk-verified, outside
+ * the shim, GMU buffers and XNU's use during a probe boot): "BRDC" + the
+ * step name. The next probe boot shows it before doing anything.
+ */
+#define CRUMB		0x17e000000UL	/* < 0x17e2c0000, the end of the memwalked range */
+#define CRUMB_MAGIC	0x43445242u	/* "BRDC" */
+
+static void __attribute__((noinline)) crumb(const char *what)
+{
+	/* hide the pointer: no folding of (literal - CRUMB) into absolute constants */
+	__asm__ volatile("" : "+r"(what));
+	volatile char *c = (volatile char *)(CRUMB + 8);
+	int i = 0;
+	for (; what[i] && i < 60; i++)
+		c[i] = what[i];
+	c[i] = 0;
+	*(volatile uint32_t *)CRUMB = CRUMB_MAGIC;
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+
+/* stage-3 step: breadcrumb, line on screen, then a pause to film it */
+static void step(const char *what)
+{
+	crumb(what);
+	con_str("STEP", what);
+	mdelay(1500);
+}
 
 static int cmddb_aux(const char *id, uintptr_t *aux, uint32_t *len)
 {
@@ -547,7 +578,7 @@ static void gmu_power_up(void)
 	con_hex2("G2H", "info=", rd32(GMU_REG(GMU_G2H_INFO)), "fault=", rd32(GMU_REG(GMU_G2H_INFO)) & G2H_CM3_FAULT);
 
 	/* a6xx_gmu_gfx_rail_on: max-level indices + OOB BOOT_SLUMBER (22 -> 30) */
-	con_str("STEP", "gfx rail on (OOB boot-slumber)");
+	step("gfx rail on (OOB boot-slumber)");
 	wr32(GMU_REG(GMU_BOOT_SLUMBER), 0);
 	wr32(GMU_REG(GMU_GX_VOTE_IDX), gx[NGPU - 1] & 0xff);
 	wr32(GMU_REG(GMU_MX_VOTE_IDX), (gx[NGPU - 1] >> 8) & 0xff);
@@ -555,7 +586,7 @@ static void gmu_power_up(void)
 	con_hex2(rc ? " slumber TIMEOUT" : " slumber acked", "info=", rd32(GMU_REG(GMU_G2H_INFO)), "rpmh=", rd32(GMU_REG(GMU_RPMH_STATE)));
 
 	/* a6xx_sptprac_enable */
-	con_str("STEP", "SPTPRAC enable");
+	step("SPTPRAC enable");
 	wr32(GMU_REG(GMU_SPTPRAC_CTRL), 0x778000);
 	rc = -1;
 	for (int i = 0; i < 100; i++)
@@ -567,7 +598,7 @@ static void gmu_power_up(void)
 	con_hex2(rc ? " sptprac FAIL" : " sptprac on", "status=", rd32(GMU_REG(GMU_SPTPRAC_STATUS)), 0, 0);
 
 	/* a6xx_gmu_hfi_start: the GMU sets up its queues before any message */
-	con_str("STEP", "HFI_CTRL_INIT");
+	step("HFI_CTRL_INIT");
 	wr32(GMU_REG(GMU_HFI_CTRL_INIT), 1);
 	rc = wait_bit(GMU_REG(GMU_HFI_CTRL), 1, 1, 100);
 	con_hex2(rc ? " hfi NOT ready" : " hfi ready", "status=", rd32(GMU_REG(GMU_HFI_CTRL)),
@@ -576,16 +607,20 @@ static void gmu_power_up(void)
 		return;
 
 	/* a6xx_hfi_start_v1 */
-	con_str("STEP", "HFI v1: init, version, perf, bw, test");
+	step("HFI v1: init, version, perf, bw, test");
 	for (int i = 0; i < 192; i++)
 		msg[i] = 0;
 	msg[1] = 0;			/* seg_id */
 	msg[2] = VA_DEBUG;
 	msg[3] = 0x4000;
 	msg[4] = 1;			/* GMU_COLD_BOOT */
+	crumb("HFI msg 0 init");
 	int r_init = hfi_send(0, msg, 5);
+	con_hex2(" init", "rc=", (uint32_t)r_init, "fault=", rd32(GMU_REG(GMU_G2H_INFO)) & G2H_CM3_FAULT);
 	msg[1] = 1;			/* supported_version */
+	crumb("HFI msg 1 version");
 	int r_ver = hfi_send(1, msg, 2);
+	con_hex2(" ver", "rc=", (uint32_t)r_ver, 0, 0);
 	for (int i = 0; i < 192; i++)
 		msg[i] = 0;
 	msg[1] = NGPU;
@@ -598,7 +633,9 @@ static void gmu_power_up(void)
 		msg[3 + 32 + 2 * i] = cx[i];
 		msg[4 + 32 + 2 * i] = gmu_khz[i];
 	}
+	crumb("HFI msg 4 perf table");
 	int r_perf = hfi_send(4, msg, 3 + 32 + 8);
+	con_hex2(" perf", "rc=", (uint32_t)r_perf, 0, 0);
 	for (int i = 0; i < 192; i++)
 		msg[i] = 0;
 	/* a6xx_build_bw_table (default A6xx gen1, A615 uses it) */
@@ -622,7 +659,10 @@ static void gmu_power_up(void)
 	msg[32] = 0x40000000;		/* ddr data [16][8] */
 	msg[33] = 0x40000000;
 	msg[34] = 0x40000000;
+	crumb("HFI msg 3 bw table");
 	int r_bw = hfi_send(3, msg, 32 + 128);
+	con_hex2(" bw", "rc=", (uint32_t)r_bw, 0, 0);
+	crumb("HFI msg 5 test");
 	int r_test = hfi_send(5, msg, 1);
 	con_hex2("HFI", "init=", (uint32_t)r_init, "ver=", (uint32_t)r_ver);
 	con_hex2(" hfi", "perf=", (uint32_t)r_perf, "bw=", (uint32_t)r_bw);
@@ -630,7 +670,7 @@ static void gmu_power_up(void)
 	con_hex2(" g2h", "info=", rd32(GMU_REG(GMU_G2H_INFO)), "fault=", rd32(GMU_REG(GMU_G2H_INFO)) & G2H_CM3_FAULT);
 
 	/* OOB GPU_SET (legacy 16 -> 24): the GMU powers the GX side */
-	con_str("STEP", "OOB GPU_SET");
+	step("OOB GPU_SET");
 	rc = oob(16, 24);
 	con_hex2(rc ? " gpu_set TIMEOUT" : " gpu_set acked", "gx_gdsc=", rd32(GPUCC + GPUCC_GX_GDSCR), "info=", rd32(GMU_REG(GMU_G2H_INFO)));
 	con_hex2(" gcc", "memnoc=", rd32(GCC + 0x7100c), "snoc=", rd32(GCC + 0x71018));
@@ -638,7 +678,7 @@ static void gmu_power_up(void)
 		con_str("GX", "not powered - not touching GPU registers");
 		return;
 	}
-	con_str("STEP", "GPU registers (GX side)");
+	step("GPU registers (GX side)");
 	con_hex2("RBBM", "status=", rd32(GPU + 4 * 0x210), "chipid=", rd32(GPU + 4 * 0x885));
 	wr32(GPU + 4 * 0x883, 0x41445245);
 	con_hex2("SCRATCH0", "now=", rd32(GPU + 4 * 0x883), "want=", 0x41445245);
@@ -646,6 +686,15 @@ static void gmu_power_up(void)
 
 void gpu_probe(void)
 {
+	if (*(volatile uint32_t *)CRUMB == CRUMB_MAGIC) {
+		con_line("LAST PROBE RUN STOPPED AT:", YELLOW);
+		con_line((const char *)(CRUMB + 8), WHITE);
+		*(volatile uint32_t *)CRUMB = 0;
+		con_str("NEXT", "continuing in 15 s (photo this)");
+		mdelay(15000);
+		con_clear(RED);
+	}
+	crumb("stage 1");
 	con_line("GPU PROBE stage 1  Adreno 615: CX power, GMU regs, SMMU", GREEN);
 	con_hex2("GPUCC", "cx_gdsc=", rd32(GPUCC + GPUCC_CX_GDSCR), "gx_gdsc=", rd32(GPUCC + GPUCC_GX_GDSCR));
 	con_hex2(" gmu", "rcg=", rd32(GPUCC + GPUCC_GMU_RCG), "cfg=", rd32(GPUCC + GPUCC_GMU_RCG + 4));
@@ -698,5 +747,6 @@ void gpu_probe(void)
 	con_str("GPU", "stage 1 done");
 	con_skip();
 	gmu_boot();
+	crumb("probe finished normally");
 	con_str("GPU", "probe done - no GPU commands were run");
 }
