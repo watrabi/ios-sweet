@@ -806,6 +806,64 @@ static int zap_load(void)
 	return (rc || r1) ? -1 : 0;
 }
 
+/*
+ * Visible proof (ios-flame's gpu_paint): map the panel framebuffer into the
+ * GPU as 2 MB blocks and let the GPU paint a band - one gradient row by
+ * CP_MEM_WRITE, the rest copied down by CP_MEMCPY. The CPU never writes it.
+ */
+#define GVA_FB		0x20000000u
+#define FBPA		0x9c000000UL	/* bonito splash framebuffer */
+#define FBSTRIDE	4320u
+#define BAND_Y		1250u
+#define BAND_H		600u
+
+static int flush_quiet(void)
+{
+	wr32(GREG(0x807), wptr);
+	for (int i = 0; i < 1000; i++) {
+		if (rd32(GREG(0x806)) == wptr && !(rd32(GREG(0x210)) & (1u << 23)))
+			return 0;
+		mdelay(1);
+	}
+	return -1;
+}
+
+static void gpu_paint(uintptr_t c)
+{
+	for (uint32_t i = 0; i < 5; i++)	/* 10 MB as 2 MB blocks: AF, inner sh, AP=01, block */
+		wr64(GT_L2 + 8 * (((GVA_FB >> 21) & 0x1ff) + i),
+		     (FBPA + 0x200000UL * i) | (1u << 10) | (3u << 8) | (1u << 6) | 1u);
+	wr32(c + 0x618, 0);			/* CB TLBIALL */
+	wr32(c + 0x7f0, 0);			/* CB TLBSYNC */
+	wait_bit(c + 0x7f4, 1, 0, 10);
+
+	uint32_t row = GVA_FB + BAND_Y * FBSTRIDE;
+	pkt7(0x3d, 2 + 1080);			/* CP_MEM_WRITE one row */
+	ring(row);
+	ring(0);
+	for (uint32_t x = 0; x < 1080; x++) {
+		uint32_t r = x * 255 / 1079, b = 255 - r, g = (x / 60) % 2 ? 200 : 40;
+		ring(0xff000000u | (r << 16) | (g << 8) | b);
+	}
+	pkt7(0x26, 0);
+	int rc = flush_quiet();
+	for (uint32_t y = 1; y < BAND_H && !rc; y++) {
+		pkt7(0x75, 5);			/* CP_MEMCPY: dwords, src lo/hi, dst lo/hi */
+		ring(1080);
+		ring(row);
+		ring(0);
+		ring(row + y * FBSTRIDE);
+		ring(0);
+		if ((y % 100) == 0)
+			rc = flush_quiet();
+	}
+	pkt7(0x26, 0);
+	if (!rc)
+		rc = flush_quiet();
+	con_hex2(rc ? "PAINT TIMEOUT" : "PAINTED", "rows=", BAND_H, "fsr=", rd32(c + CB_FSR));
+	con_line("the gradient band below was drawn by the GPU", GREEN);
+}
+
 static void gpu_run(void)
 {
 	int cb = gmu_cb + 1, smr = -1;
@@ -935,6 +993,10 @@ static void gpu_run(void)
 	con_line(rd32(G_TARGET) == 0xcafef00d ? "*** THE GPU EXECUTED OUR COMMANDS ***" :
 		 "target unchanged", rd32(G_TARGET) == 0xcafef00d ? GREEN : YELLOW);
 	con_hex2(" cb", "fsr=", rd32(c + CB_FSR), "far=", rd32(c + CB_FAR));
+	if (rd32(G_TARGET) == 0xcafef00d) {
+		crumb("gpu paint");
+		gpu_paint(c);
+	}
 	crumb("stage 4-5 finished");
 }
 
