@@ -243,5 +243,12 @@ Run (after the user unlocks the bootloader - `fastboot flashing unlock` WIPES An
   a630_sqe.fw (0x7d84 B) at CP_SQE_INSTR_BASE 0x830, 32K ring, CP_ME_INIT idle (rptr = wptr = 9);
   zap via SCM PAS 13: supported / INIT_IMAGE / MEM_SETUP(0x97a15000, 0x2000) / AUTH_AND_RESET all rc 0;
   CP_SET_SECURE_MODE 0; **CP_MEM_WRITE -> target = 0xcafef00d**; no SMMU fault (FSR 0x400, FAR 0).
+- **FIRST GPU PIXELS ON THE PANEL** (shim-gpu6.img, commit f5d47eb, 2026-11-01 ~03:12 UTC): framebuffer
+  0x9c000000 mapped into the GPU as 2 MB blocks at GPU VA 0x20000000; one gradient row by CP_MEM_WRITE,
+  599 more by CP_MEMCPY at y 1250: PAINTED rows 600, FSR 0x400, user photo shows the blue->red striped band.
+- GPU next: port the bring-up into XNU as a kernel service (ios-flame 0095 sweet_a6xx + 0096/0097 Metal
+  accelerator/user client + fixes 0105-0122, with this file's A615 values: legacy GMU, no HFI messages
+  for now, SID 0/5 without SMR masks, gen1 hw_init, a615 zap in gpu_region 0x97a15000); then build Turnip
+  + the metal2vulkan bridge for iOS on a macOS CI runner and install them into the root image.
 - Earlier plan for stage 3: then gfx_rail_on + sptprac_enable, legacy HFI
   (v1) start, OOB GPU set -> GX GDSC on; then zap shader (TZ PAS, a615_zap), SQE, ring, first commands.
