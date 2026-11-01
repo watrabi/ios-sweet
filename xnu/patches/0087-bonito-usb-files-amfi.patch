@@ -616,7 +616,7 @@ index 0000000..2465222
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
-index b6c1a41..a4fa0a4 100644
+index b6c1a41..a681221 100644
 --- a/bsd/dev/sweet_usb.c
 +++ b/bsd/dev/sweet_usb.c
 @@ -3,7 +3,7 @@
@@ -910,7 +910,7 @@ index b6c1a41..a4fa0a4 100644
  /*
   * Live console log over USB Ethernet: every 100 ms the new bytes of the
   * console ring (bsd/dev/sweet_ufs.c) go as UDP datagrams to
-@@ -848,23 +1028,269 @@ ud_log_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -848,25 +1028,335 @@ ud_log_thread(void *arg __unused, wait_result_t wr __unused)
  	}
  }
  
@@ -1136,6 +1136,67 @@ index b6c1a41..a4fa0a4 100644
 +	ud_hsphy_dump(p, "after init");
 +}
 +
++/*
++ * bonito: the QUSB2 v2 PHY (qcom,sdm670-qusb2-phy at 0x088e2000). ABL powers
++ * it down when it hands over: the DWC3's endpoint commands then never
++ * complete (no PHY clock). Linux phy-qcom-qusb2.c qusb2_phy_init for
++ * qusb2_v2_phy_cfg: BCR reset (GCC_QUSB2PHY_PRIM_BCR 0x12000), disable,
++ * the v2 init table (no board overrides, no efuse HSTX trim), enable, wait
++ * for CORE_READY. Regulators and clocks are left as ABL set them (on).
++ * Boot-arg sweetqusb=0 skips the init (dump only).
++ */
++#define QUSB2_PLL_STATUS        0x1a0
++#define QUSB2_PWR_CTRL1         0x210
++
++static void
++ud_qusb2_dump(vm_offset_t p, const char *when)
++{
++	printf("SWEET USB: QUSB2 %s: pll_status 0x%x pwr_ctrl1 0x%x pwr_ctrl2 0x%x tune1-5 %x %x %x %x %x\n", when,
++	    usb_rd(p, QUSB2_PLL_STATUS), usb_rd(p, QUSB2_PWR_CTRL1), usb_rd(p, 0x214), usb_rd(p, 0x240),
++	    usb_rd(p, 0x244), usb_rd(p, 0x248), usb_rd(p, 0x24c), usb_rd(p, 0x250));
++}
++
++static void
++ud_qusb2_init(void)
++{
++	static const uint32_t tbl[][2] = {
++		{ 0x004, 0x03 }, { 0x18c, 0x7c }, { 0x02c, 0x80 }, { 0x184, 0x0a }, { 0x0b4, 0x19 },
++		{ 0x194, 0x40 }, { 0x198, 0x20 }, { 0x214, 0x21 }, { 0x220, 0x00 }, { 0x224, 0x58 },
++		{ 0x240, 0x30 }, { 0x244, 0x29 }, { 0x248, 0xca }, { 0x24c, 0x04 }, { 0x250, 0x03 },
++		{ 0x23c, 0x00 },
++	};
++	int doinit = 1;
++	PE_parse_boot_argn("sweetqusb", &doinit, sizeof(doinit));
++	vm_offset_t p = ml_io_map(QUSB2_PA, 0x1000), gcc = ml_io_map(GCC_PA, GCC_SIZE);
++	if (!p || !gcc) {
++		return;
++	}
++	ud_qusb2_dump(p, "as ABL left it");
++	if (!doinit) {
++		return;
++	}
++	*(volatile uint32_t *)(gcc + 0x12000) = 1;              /* GCC_QUSB2PHY_PRIM_BCR assert */
++	__asm__ volatile ("dsb sy" ::: "memory");
++	delay(150);
++	*(volatile uint32_t *)(gcc + 0x12000) = 0;
++	__asm__ volatile ("dsb sy" ::: "memory");
++	delay(150);
++	volatile uint32_t *pwr = (volatile uint32_t *)(p + QUSB2_PWR_CTRL1);
++	*pwr |= (1u << 5) | (1u << 1) | (1u << 0);              /* VREF_SUPPLY_TRIM | CLAMP_N_EN | POWER_DOWN */
++	for (unsigned i = 0; i < sizeof(tbl) / sizeof(tbl[0]); i++) {
++		*(volatile uint32_t *)(p + tbl[i][0]) = tbl[i][1];
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	*pwr &= ~1u;                                            /* enable */
++	__asm__ volatile ("dsb sy" ::: "memory");
++	delay(200);
++	int i;
++	for (i = 0; i < 100 && !(usb_rd(p, QUSB2_PLL_STATUS) & 1u); i++) {
++		delay(100);
++	}
++	ud_qusb2_dump(p, i < 100 ? "after init: CORE_READY" : "after init: NOT READY");
++}
++
  static void
  sweet_usb_gadget_start(vm_offset_t dwc)
  {
@@ -1187,8 +1248,13 @@ index b6c1a41..a4fa0a4 100644
 -	ud_if_create();
  
  	/* Device controller soft reset (PHY and global setup stay as ABL left them). */
++	if (usb_bonito) {
++		ud_qusb2_init();
++	}
  	dwc_wr(DCTL, DCTL_CSFTRST);
-@@ -878,18 +1304,21 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+ 	int i;
+ 	for (i = 0; i < 500 && (dwc_rd(DCTL) & DCTL_CSFTRST); i++) {
+@@ -878,18 +1368,21 @@ sweet_usb_gadget_start(vm_offset_t dwc)
  		return;
  	}
  
@@ -1210,7 +1276,7 @@ index b6c1a41..a4fa0a4 100644
  	/* Endpoint 0 OUT/IN: start config, control type, max packet 512 until connect done. */
  	if (ud_epcmd(0, DEPCMD_DEPSTARTCFG, 0, 0, 0) ||
  	    ud_epcmd(0, DEPCMD_SETEPCONFIG, (0u << 1) | (512u << 3), (1u << 8) | (1u << 10) | (0u << 25), 0) ||
-@@ -900,7 +1329,10 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+@@ -900,7 +1393,10 @@ sweet_usb_gadget_start(vm_offset_t dwc)
  		return;
  	}
  	dwc_wr(DALEPENA, 0x3);
@@ -1221,7 +1287,7 @@ index b6c1a41..a4fa0a4 100644
  
  	vm_offset_t qs = ml_io_map(QSCRATCH_PA, 0x100);
  	if (qs != 0) {
-@@ -927,5 +1359,12 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+@@ -927,5 +1423,12 @@ sweet_usb_gadget_start(vm_offset_t dwc)
  	if (livelog && ud.ifp != NULL && kernel_thread_start(ud_log_thread, NULL, &thread) == KERN_SUCCESS) {
  		thread_deallocate(thread);
  	}
