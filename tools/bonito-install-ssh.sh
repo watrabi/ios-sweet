@@ -31,6 +31,7 @@ for a in ls cat cp mv rm mkdir rmdir ln chmod chown ps kill grep sed head tail w
 	free top hostname nc ping ifconfig netstat dmesg sync md5sum sha1sum sha256sum tar gzip less vi; do
 	$F link /var/local/bin/toybox /var/local/bin/$a >/dev/null 2>&1 || true
 done
+$F link /var/local/bin/dash /bin/sh 2>/dev/null || true
 $F put $W/id_ed25519.pub /var/root/.ssh/authorized_keys 600
 printf 'export PATH=/var/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\nexport TERM=xterm\n' > $W/profile
 $F put $W/profile /var/root/.profile 644

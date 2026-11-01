@@ -2,4 +2,4 @@
 # Root shell on the phone over USB Ethernet (tools/bonito-install-ssh.sh installed dropbear).
 cd "$(dirname "$0")/.."
 exec ssh -i work/ssh/id_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-	-o ConnectTimeout=10 root@192.168.7.2 "$@"
+	-o ConnectTimeout=10 -o SetEnv=PATH=/var/local/bin:/usr/bin:/bin:/usr/sbin:/sbin root@192.168.7.2 "export PATH=/var/local/bin:/usr/bin:/bin:/usr/sbin:/sbin; ${*:-exec sh -l}"
