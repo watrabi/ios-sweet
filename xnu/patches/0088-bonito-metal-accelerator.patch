@@ -2386,7 +2386,7 @@ index 0000000..d56ab02
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 422cfdb..4317944 100644
+index 422cfdb..e6782af 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -43,8 +43,8 @@ extern "C" {
@@ -2400,7 +2400,29 @@ index 422cfdb..4317944 100644
  void sweet_gpu_panel_stride(uint32_t stride);
  extern int sweet_display_fit_x, sweet_display_fit_w;
  }
-@@ -409,7 +409,8 @@ AppleCLCD::presentGPU(const uint8_t *rec)
+@@ -188,8 +188,19 @@ AppleCLCD::start(IOService *provider)
+ 		fLogicalW = SWEET_FB_LOGICAL_W;
+ 		fLogicalH = SWEET_FB_LOGICAL_H;
+ 	}
+-	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
+-	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
++	/*
++	 * bonito: boot-arg sweetfb_scale=2 presents the iPhone X layout at @2x (375x812 points = 750x1624
++	 * pixels, 55% fewer than @3x): Core Animation renders less, and the GPU present scales it to the panel.
++	 * The ADT must match (tools/mkadt.py --scale2: /chosen display-scale 2, disp0 canvas 750x1624).
++	 */
++	uint32_t scale = 3;
++	PE_parse_boot_argn("sweetfb_scale", &scale, sizeof(scale));
++	if (!native && scale == 2) {
++		fLogicalW = 750;
++		fLogicalH = 1624;
++	}
++	fOffX = fLogicalW > fWidth ? (int32_t)(fLogicalW - fWidth) / 2 : 0;
++	fOffY = fLogicalH > fHeight ? (int32_t)(fLogicalH - fHeight) / 2 : 0;
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	/* With the GPU (sweetgpu=1) the panel later switches to 4352-byte rows: map that much. */
+@@ -409,7 +420,8 @@ AppleCLCD::presentGPU(const uint8_t *rec)
  		IOLog("SWEET FB: frames now scaled to fit by the GPU (panel stride %u)\n", fRowBytes);
  	}
  	uint32_t dx = 0, dw = 0;
@@ -2617,6 +2639,27 @@ index 7f90c56..0fba502 100644
  	}
  
  	uint64_t alloc = sweet_dict_u32(props, "IOSurfaceAllocSize", 0);
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index 3c1b6bb..5ad3241 100644
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -439,10 +439,12 @@ SweetHIDTouch::start(IOService *provider)
+ 	/* Touch reports panel pixels: sweet 1080x2400, bonito 1080x2160. */
+ 	fPanelW = PE_state.video.v_width ? (int)PE_state.video.v_width : 1080;
+ 	fPanelH = PE_state.video.v_height ? (int)PE_state.video.v_height : 2400;
+-	fLogicalW = native ? fPanelW : 1125;
+-	fLogicalH = native ? fPanelH : 2436;
+-	fOffX = (fLogicalW - fPanelW) / 2;
+-	fOffY = (fLogicalH - fPanelH) / 2;
++	uint32_t scale = 3;
++	PE_parse_boot_argn("sweetfb_scale", &scale, sizeof(scale));
++	fLogicalW = native ? fPanelW : scale == 2 ? 750 : 1125;     /* sweetfb_scale=2: @2x (SweetFramebuffer.cpp) */
++	fLogicalH = native ? fPanelH : scale == 2 ? 1624 : 2436;
++	fOffX = fLogicalW > fPanelW ? (fLogicalW - fPanelW) / 2 : 0;
++	fOffY = fLogicalH > fPanelH ? (fLogicalH - fPanelH) / 2 : 0;
+ 	/* The digitizer covers the main display (backboardd maps it 1:1). */
+ 	setProperty("DisplayIntegrated", kOSBooleanTrue);
+ 	/* mm, 16.16: sweet 68x151; bonito (2160 rows) 69x137 per its device tree */
 diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
 --- a/osfmk/arm/pmap/pmap.c
 +++ b/osfmk/arm/pmap/pmap.c
