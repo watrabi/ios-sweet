@@ -105,6 +105,13 @@ Three boots 2026-10-31:
   0xc0ff8080, EXT_CSD rev 8, 122142720 sectors, cache off` / `high speed 48 MHz, 8-bit bus` / `"userdata" on
   LUN 0: first block 0x211c80, 51163 MiB, read-only, DMA at 0xa5f1c000` / `BSD root: ufsroot0` ->
   hfs: unknown Volume Signature e93f -> cannot mount root (expected: userdata holds no HFS yet).
+- **FIRST BOOT FROM INTERNAL eMMC (2026-11-01 ~00:20 UTC).** `sudo tools/bonito-test-root.sh` -> 8 MiB
+  case-sensitive HFS+ (HX v5, /sbin/launchd = sweet-init, /dev); user flashed it: `fastboot flash userdata
+  shim/out/root-hfs.img` (userdata now = this test volume). Boot shim-boot-0082-emmc-ro.img: SWEET EMMC
+  48 MHz 8-bit -> BSD root ufsroot0 -> `hfs: mounted SweetRoot on device b(1, 0)` -> root not authenticated,
+  continuing unsealed -> load_init_program /sbin/launchd -> `*** SWEET userspace: init running as PID 1 ***`
+  + heartbeat. Read-only (no ufsrw); write path (CMD24/25) untested.
+- hfsprogs: built from AUR in /tmp/hfsprogs, installed by the user with sudo pacman -U.
 - Patch 0083 = ios-flame's iig fix. **macos-15 build works**: run 41255314009 (commit 953e524, macOS 15.8.2,
   Xcode 16.0) success in ~7 min. Its kernel is not hardware-tested yet; then make macos-15 the default runner.
 - Transport inside sweet_ufs.c selected by ADT /sweet-emmc (mkadt --bonito); same sequence as the shim.
