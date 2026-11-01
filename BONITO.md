@@ -199,8 +199,9 @@ Run (after the user unlocks the bootloader - `fastboot flashing unlock` WIPES An
   issue on sweet ("Phone/Photos/Messages show black, no crash") - userland CPU rendering, not the port.
 - PosterBoard crashes (sig 5) -> no lock-screen wallpaper (ios-flame HANDOFF: default wallpaper is HEIC,
   CPU renderer can't draw it). mediaserverd sig 6 once; vmd burns ~60% CPU.
-- Next: keys (power/volume: PM660 PON + PM660L GPIO 7) so the display can be woken; RTC; USB networking;
-  cpufreq; black-app investigation with sweetsample=.
+- **KEYS WORK** (patch 0085, CI run 41264425685, kernel xnu/out-0085, image shim-boot-0085-ios.img with
+  TOUCH=1 KEYS=1 CPUS=6): user confirmed power and volume up/down on iOS.
+- Next: RTC; USB networking; cpufreq; black-app investigation with sweetsample=; GPU (see below).
 
 ## GPU bring-up (Adreno 615), shim probes - port of ios-flame's shim/gpuprobe.c
 - Firmware pulled from the phone's vendor_b (TWRP, read-only mount): a615_zap.{mdt,b00,b01,b02,elf},
