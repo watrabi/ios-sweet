@@ -13,6 +13,13 @@ on:
       unixnu:
         description: UniXNU commit whose patches/mesa to apply (ios-flame's era)
         default: e19e517448432ae2d60676a31caf9c7299884f81
+  push:
+    branches: [bonito]
+    paths:
+      - "userland/**"
+      - ".github/workflows/metal.yml"
+      - "tools/build-turnip-ios.sh"
+      - "tools/build-m2v-bridge.sh"
 
 concurrency:
   group: metal-${{ github.ref }}
