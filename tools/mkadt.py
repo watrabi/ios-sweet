@@ -80,7 +80,7 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False, bonito=None, gpupool=0, scale2=False):
+def build(seed=None, qemu=False, highmem=False, bonito=None, gpupool=0, scale2=False, xr=False):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
     phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
     fb_h = FB_H
@@ -120,7 +120,7 @@ def build(seed=None, qemu=False, highmem=False, bonito=None, gpupool=0, scale2=F
         # from /chosen, the pixel size from IOMobileFramebuffer. Scale 0 makes
         # SpringBoard's FBSDisplayMode "infxinf@0x" invalid. 1080x2400 @3x =
         # 360x800 points (like iPhone X class devices).
-        ('display-scale', u32(2 if scale2 else 3)),
+        ('display-scale', u32(2 if (scale2 or xr) else 3)),
         # XNU derives IOPlatformUUID (gethostuuid) from these on arm; without
         # them CFPreferences cannot use kCFPreferencesCurrentHost (no ByHost
         # files), so e.g. DataMigration never records LastSystemVersion and
@@ -207,8 +207,9 @@ def build(seed=None, qemu=False, highmem=False, bonito=None, gpupool=0, scale2=F
             ph(),
             ('device_type', cstr('display-subsystem')),
             ('compatible', cstr('sweet,display')),
-            ('canvas-width', u32(750 if scale2 else 1125)),   # --scale2: @2x (boot-arg sweetfb_scale=2)
-            ('canvas-height', u32(1624 if scale2 else 2436)),
+            # --scale2: iPhone X layout @2x (750x1624); --xr: iPhone XR class, 414x896 points @2x (828x1792)
+            ('canvas-width', u32(828 if xr else 750 if scale2 else 1125)),
+            ('canvas-height', u32(1792 if xr else 1624 if scale2 else 2436)),
         ])])
 
     fbcon = node('sweet-fbcon', [
@@ -274,7 +275,7 @@ if __name__ == '__main__':
     bonito = 'wide' if '--bonito-wide' in sys.argv else 'upper' if '--bonito' in sys.argv else None
     gpupool = int(sys.argv[sys.argv.index('--gpupool') + 1], 0) << 20 if '--gpupool' in sys.argv else 0
     root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv, bonito=bonito, gpupool=gpupool,
-                 scale2='--scale2' in sys.argv)
+                 scale2='--scale2' in sys.argv, xr='--xr' in sys.argv)
     if '--gpufw' in sys.argv:
         # /chosen/gpufw,<file>: Adreno 615 firmware for bsd/dev/sweet_gpu.c (0086, boot-arg sweetgpu=1)
         fw_dir = sys.argv[sys.argv.index('--gpufw') + 1]

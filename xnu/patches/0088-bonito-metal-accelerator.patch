@@ -2386,7 +2386,7 @@ index 0000000..d56ab02
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 422cfdb..e6782af 100644
+index 422cfdb..c7c9092 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -43,8 +43,8 @@ extern "C" {
@@ -2400,7 +2400,43 @@ index 422cfdb..e6782af 100644
  void sweet_gpu_panel_stride(uint32_t stride);
  extern int sweet_display_fit_x, sweet_display_fit_w;
  }
-@@ -188,8 +188,19 @@ AppleCLCD::start(IOService *provider)
+@@ -60,6 +60,7 @@ extern int sweet_display_fit_x, sweet_display_fit_w;
+ #include <IOKit/IOTimerEventSource.h>
+ #include <IOKit/system.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
+ #include <kern/clock.h>
+ #include <sys/proc.h>
+ 
+@@ -138,6 +139,27 @@ public:
+ 	bool presentGPU(const uint8_t *rec);
+ };
+ 
++
++/* bonito: the presented size is the ADT's /arm-io/disp0 canvas (tools/mkadt.py --scale2 / --xr), 0 if none. */
++static bool
++sweet_canvas_size(uint32_t *w, uint32_t *h)
++{
++	DTEntry e;
++	void const *p;
++	unsigned int sz;
++	*w = *h = 0;
++	if (SecureDTLookupEntry(NULL, "/arm-io/disp0", &e) != kSuccess) {
++		return false;
++	}
++	if (SecureDTGetProperty(e, "canvas-width", &p, &sz) == kSuccess && sz == 4) {
++		*w = *(const uint32_t *)p;
++	}
++	if (SecureDTGetProperty(e, "canvas-height", &p, &sz) == kSuccess && sz == 4) {
++		*h = *(const uint32_t *)p;
++	}
++	return *w && *h;
++}
++
+ OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
+ 
+ class IOMobileFramebufferUserClient : public IOUserClient {
+@@ -188,8 +210,18 @@ AppleCLCD::start(IOService *provider)
  		fLogicalW = SWEET_FB_LOGICAL_W;
  		fLogicalH = SWEET_FB_LOGICAL_H;
  	}
@@ -2411,18 +2447,17 @@ index 422cfdb..e6782af 100644
 +	 * pixels, 55% fewer than @3x): Core Animation renders less, and the GPU present scales it to the panel.
 +	 * The ADT must match (tools/mkadt.py --scale2: /chosen display-scale 2, disp0 canvas 750x1624).
 +	 */
-+	uint32_t scale = 3;
-+	PE_parse_boot_argn("sweetfb_scale", &scale, sizeof(scale));
-+	if (!native && scale == 2) {
-+		fLogicalW = 750;
-+		fLogicalH = 1624;
++	uint32_t cw, ch;
++	if (!native && sweet_canvas_size(&cw, &ch)) {
++		fLogicalW = cw;
++		fLogicalH = ch;
 +	}
 +	fOffX = fLogicalW > fWidth ? (int32_t)(fLogicalW - fWidth) / 2 : 0;
 +	fOffY = fLogicalH > fHeight ? (int32_t)(fLogicalH - fHeight) / 2 : 0;
  	fLock = IOLockAlloc();
  	fClients = OSArray::withCapacity(4);
  	/* With the GPU (sweetgpu=1) the panel later switches to 4352-byte rows: map that much. */
-@@ -409,7 +420,8 @@ AppleCLCD::presentGPU(const uint8_t *rec)
+@@ -409,7 +441,8 @@ AppleCLCD::presentGPU(const uint8_t *rec)
  		IOLog("SWEET FB: frames now scaled to fit by the GPU (panel stride %u)\n", fRowBytes);
  	}
  	uint32_t dx = 0, dw = 0;
@@ -2640,10 +2675,18 @@ index 7f90c56..0fba502 100644
  
  	uint64_t alloc = sweet_dict_u32(props, "IOSurfaceAllocSize", 0);
 diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
-index 3c1b6bb..5ad3241 100644
+index 3c1b6bb..71ebb77 100644
 --- a/iokit/Kernel/arm/hid/SweetHID.cpp
 +++ b/iokit/Kernel/arm/hid/SweetHID.cpp
-@@ -439,10 +439,12 @@ SweetHIDTouch::start(IOService *provider)
+@@ -21,6 +21,7 @@
+ #include <IOKit/IOTimerEventSource.h>
+ #include <libkern/c++/OSArray.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
+ 
+ #include "IOHIDEventService.h"
+ #include "IOHIDEventServiceUserClient.h"
+@@ -439,10 +440,25 @@ SweetHIDTouch::start(IOService *provider)
  	/* Touch reports panel pixels: sweet 1080x2400, bonito 1080x2160. */
  	fPanelW = PE_state.video.v_width ? (int)PE_state.video.v_width : 1080;
  	fPanelH = PE_state.video.v_height ? (int)PE_state.video.v_height : 2400;
@@ -2651,10 +2694,23 @@ index 3c1b6bb..5ad3241 100644
 -	fLogicalH = native ? fPanelH : 2436;
 -	fOffX = (fLogicalW - fPanelW) / 2;
 -	fOffY = (fLogicalH - fPanelH) / 2;
-+	uint32_t scale = 3;
-+	PE_parse_boot_argn("sweetfb_scale", &scale, sizeof(scale));
-+	fLogicalW = native ? fPanelW : scale == 2 ? 750 : 1125;     /* sweetfb_scale=2: @2x (SweetFramebuffer.cpp) */
-+	fLogicalH = native ? fPanelH : scale == 2 ? 1624 : 2436;
++	/* the presented size: the ADT's /arm-io/disp0 canvas (SweetFramebuffer.cpp), else the iPhone X's */
++	uint32_t cw = 1125, ch = 2436;
++	{
++		DTEntry e;
++		void const *p;
++		unsigned int sz;
++		if (SecureDTLookupEntry(NULL, "/arm-io/disp0", &e) == kSuccess) {
++			if (SecureDTGetProperty(e, "canvas-width", &p, &sz) == kSuccess && sz == 4) {
++				cw = *(const uint32_t *)p;
++			}
++			if (SecureDTGetProperty(e, "canvas-height", &p, &sz) == kSuccess && sz == 4) {
++				ch = *(const uint32_t *)p;
++			}
++		}
++	}
++	fLogicalW = native ? fPanelW : (int)cw;
++	fLogicalH = native ? fPanelH : (int)ch;
 +	fOffX = fLogicalW > fPanelW ? (fLogicalW - fPanelW) / 2 : 0;
 +	fOffY = fLogicalH > fPanelH ? (fLogicalH - fPanelH) / 2 : 0;
  	/* The digitizer covers the main display (backboardd maps it 1:1). */
