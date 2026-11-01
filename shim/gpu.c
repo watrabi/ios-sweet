@@ -109,7 +109,14 @@ static void branch_on(const char *name, uintptr_t reg)
 /* GMU page tables + buffers: verified-free RAM (memwalk), 1 MiB. */
 #define GMEM		0x170000000UL
 #define GMEM_L1		(GMEM + 0x0000)
+#define GMEM_L2_0	(GMEM + 0x1000)		/* VA 0x00000000-0x3fffffff */
 #define GMEM_L2_1	(GMEM + 0x2000)		/* VA 0x40000000-0x7fffffff */
+#define GMEM_L3_LOW	(GMEM + 0x3000)		/* VA 0x00000000-0x001fffff */
+#define GMEM_ICACHE	(GMEM + 0x10000)
+#define GMEM_DCACHE	(GMEM + 0x50000)
+#define VA_ICACHE	0x4000u
+#define VA_DCACHE	0x44000u
+#define CACHE_SIZE	0x3c000u
 #define GMEM_L3_6	(GMEM + 0x4000)		/* VA 0x60000000-0x601fffff */
 #define GMEM_DUMMY	(GMEM + 0x90000)
 #define GMEM_LOG	(GMEM + 0x91000)
@@ -171,6 +178,15 @@ static void wr64(uintptr_t pa, uint64_t v)
 }
 
 /* Stage-1 AArch64 4K page: AF, inner shareable, AttrIndx 0, AP=01 (data). */
+static void map_pages_ap(uintptr_t l3, uint32_t va, uintptr_t pa, uint32_t size, int priv)
+{
+	for (uint32_t o = 0; o < size; o += 0x1000) {
+		uint32_t idx = ((va + o) >> 12) & 0x1ff;
+		/* priv: AP=00 (privileged RW, executable); else AP=01 */
+		wr64(l3 + 8 * idx, (pa + o) | (1u << 10) | (3u << 8) | (priv ? 0 : (1u << 6)) | 3u);
+	}
+}
+
 static void map_pages(uintptr_t l3, uint32_t va, uintptr_t pa, uint32_t size)
 {
 	for (uint32_t o = 0; o < size; o += 0x1000) {
@@ -180,6 +196,7 @@ static void map_pages(uintptr_t l3, uint32_t va, uintptr_t pa, uint32_t size)
 }
 
 static int gmu_smr_ok;
+static int gmu_cb = -1;
 
 static int smmu_setup(void)
 {
@@ -203,7 +220,13 @@ static int smmu_setup(void)
 		return -1;
 
 	zero32(GMEM, GMEM_SIZE);
+	wr64(GMEM_L1 + 0, GMEM_L2_0 | 3);
 	wr64(GMEM_L1 + 8, GMEM_L2_1 | 3);
+	wr64(GMEM_L2_0 + 0, GMEM_L3_LOW | 3);
+	/* icache/dcache windows: mainline skips them for legacy GMUs ("if you don't get
+	 * random pagefaults"); downstream maps them. Zero-filled, privileged + exec. */
+	map_pages_ap(GMEM_L3_LOW, VA_ICACHE, GMEM_ICACHE, CACHE_SIZE, 1);
+	map_pages_ap(GMEM_L3_LOW, VA_DCACHE, GMEM_DCACHE, CACHE_SIZE, 1);
 	wr64(GMEM_L2_1 + 8 * ((VA_DUMMY >> 21) & 0x1ff), GMEM_L3_6 | 3);
 	map_pages(GMEM_L3_6, VA_DUMMY, GMEM_DUMMY, 0x1000);
 	map_pages(GMEM_L3_6, VA_LOG, GMEM_LOG, 0x4000);
@@ -245,6 +268,7 @@ static int smmu_setup(void)
 	}
 	con_hex2(" now", "smr=", rd32(SMR(smr)), "sctlr=", rd32(c + CB_SCTLR));
 	gmu_smr_ok = rd32(SMR(smr)) == want;
+	gmu_cb = cb;
 	return cb;
 }
 
@@ -646,6 +670,11 @@ static void gmu_power_up(void)
 	crumb("HFI msg 0 init");
 	int r_init = hfi_send(0, msg, 5);
 	con_hex2(" init", "rc=", (uint32_t)r_init, "fault=", rd32(GMU_REG(GMU_G2H_INFO)) & G2H_CM3_FAULT);
+	if (gmu_cb >= 0) {
+		uintptr_t cbr = SMMU_CB(gmu_cb);
+		con_hex2(" cb", "fsr=", rd32(cbr + CB_FSR), "far=", rd32(cbr + CB_FAR));
+		con_hex2(" cb", "fsynr0=", rd32(cbr + CB_FSYNR0), "gfsr=", rd32(SMMU + 0x48));
+	}
 	msg[1] = 1;			/* supported_version */
 	crumb("HFI msg 1 version");
 	int r_ver = hfi_send(1, msg, 2);
