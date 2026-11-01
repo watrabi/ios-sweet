@@ -5,6 +5,7 @@
 # ROOT=emmc: no RAM disk, root = userdata on eMMC (rd=ufsroot0, needs patch 0082);
 #   read-only unless the extra boot-args say ufsrw=1 rootrw=1.
 # TOUCH=1: keep the touch driver on (bonito RMI4, patch 0084).
+# CPUS=N: start N cores (default 1; bonito runs fine with 6, the A55s).
 #
 # Board drivers written for sweet are switched off: touch (Goodix + an RPMh
 # regulator vote that is a different rail on SDM670), SPMI keys (PM6150 layout)
@@ -27,7 +28,7 @@ if [ "$MEM" = wide ]; then flag=--bonito-wide; else flag=--bonito; fi
 python3 tools/mkadt.py $O/bonito-$MEM.adt $flag 2>/dev/null
 
 if [ "${ROOT:-md}" = emmc ]; then RD=rd=ufsroot0; RDARG=(); else RD=rd=md0; RDARG=(--ramdisk $O/sweet-init); fi
-ARGS="debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress $RD"
+ARGS="debug=0xc serial=3 cpus=${CPUS:-1} keepsyms=1 -enable_kprintf_spam -noprogress $RD"
 # TOUCH=1: enable the bonito RMI4 touch driver (patch 0084); keys/USB stay off.
 if [ "${TOUCH:-0}" = 1 ]; then TOUCHARG=""; else TOUCHARG="sweettouch=0 "; fi
 ARGS="$ARGS ${TOUCHARG}sweetkeys=0 sweetusb=0 wdt=-1 wdt_test=no_user_checkin $EXTRA"
