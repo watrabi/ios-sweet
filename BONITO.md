@@ -178,4 +178,10 @@ Run (after the user unlocks the bootloader - `fastboot flashing unlock` WIPES An
   waits in -[BKSSystemShellService _checkIn]; backboardd holds the check-in until the first-boot data
   migration ends (~30 min on sweet with cpus=1). Only 2 crashing daemons (driverkitd sig 9, spindump
   SIGBUS); bluetoothd and fairplayd.H2 relaunch in a loop (expected, no hardware).
-- Next: a long boot (30-45 min) to let the migration finish; then expect lock screen (no touch yet).
+- **LOCK SCREEN (2026-11-01, boot started 21:27 EST = 01:27 UTC, same image + shim-boot-0082-ios-cpus6.img):**
+  iOS 16.7.16 lock screen on bonito - date/clock, camera button, black background (no wallpaper). Shows
+  "Wednesday, December 31, 4:21" = Unix epoch in US Pacific + uptime: no RTC (port ios-flame 0099, PM660
+  RTC). Clock digits look white with a red fringe in the photo (likely OLED/camera; check channel order
+  with a known-blue UI element later). No touch/keys yet (drivers disabled by boot-args).
+- Next: touch (Synaptics RMI4 @ i2c9 0x20, 1.8 V via PM660 GPIO 12), keys (PON + PM660L GPIO 7), RTC,
+  USB networking (ios-flame 0088-0091), cpufreq (OSM, ios-flame 0086), wallpaper investigation.
