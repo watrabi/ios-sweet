@@ -17,7 +17,7 @@ on:
         default: "true"
       runner:
         description: macOS runner (macos-14 retires 2026-11-02; macos-15 needs Xcode-16 iig patch 0083)
-        default: macos-14
+        default: macos-15
   push:
     branches: [main]
     paths:
