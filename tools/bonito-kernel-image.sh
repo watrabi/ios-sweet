@@ -29,6 +29,8 @@ if [ "$MEM" = wide ]; then flag=--bonito-wide; else flag=--bonito; fi
 # USB=1: report USB state; USB=2: USB Ethernet 192.168.7.2 + file server tcp 2223 (0087)
 # GPU=1: Adreno 615 firmware into /chosen + boot-arg sweetgpu=1 (patch 0086)
 if [ "${GPU:-0}" = 1 ]; then flag="$flag --gpufw research/gpu/fw"; fi
+# METAL=1: GPU buffer pool carved from the top of RAM (512 MB, --gpupool) + boot-arg sweetmtl=2 (0088, SweetMetal2.bundle)
+if [ "${METAL:-0}" = 1 ]; then flag="$flag --gpupool ${GPUPOOL_MB:-512}"; fi
 python3 tools/mkadt.py $O/bonito-$MEM.adt $flag 2>/dev/null
 
 # The iOS root needs these (launchd exec on this macOS-target kernel, rw root, fb); IOS=0 to omit.
@@ -40,6 +42,7 @@ ARGS="debug=0xc serial=3 cpus=${CPUS:-1} keepsyms=1 -enable_kprintf_spam -noprog
 if [ "${TOUCH:-0}" = 1 ]; then TOUCHARG=""; else TOUCHARG="sweettouch=0 "; fi
 if [ "${KEYS:-0}" = 1 ]; then KEYSARG=""; else KEYSARG="sweetkeys=0 "; fi
 if [ "${GPU:-0}" = 1 ]; then GPUARG="sweetgpu=1 "; else GPUARG=""; fi
+if [ "${METAL:-0}" = 1 ]; then GPUARG="${GPUARG}sweetmtl=2 "; fi
 # GPUDBG=<s>: GPU bring-up that long after boot, TZ calls logged + paced, log flushed every second
 if [ -n "${GPUDBG:-}" ]; then GPUARG="${GPUARG}sweetgpudbg=$GPUDBG ufslogsecs=1 "; fi
 ARGS="$ARGS ${TOUCHARG}${KEYSARG}${GPUARG}sweetusb=${USB:-0} wdt=-1 wdt_test=no_user_checkin $EXTRA"

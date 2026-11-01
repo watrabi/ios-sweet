@@ -80,7 +80,7 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False, bonito=None):
+def build(seed=None, qemu=False, highmem=False, bonito=None, gpupool=0):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
     phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
     fb_h = FB_H
@@ -88,6 +88,10 @@ def build(seed=None, qemu=False, highmem=False, bonito=None):
         phys_base, mem_size = ((BONITO_WIDE_BASE, BONITO_WIDE_SIZE) if bonito == 'wide'
                                else (BONITO_PHYS_BASE, BONITO_MEM_SIZE))
         fb_h = BONITO_FB_H
+    # GPU buffer pool (patch 0088, Metal): RAM XNU never maps, so Turnip's write-combined BOs have no
+    # cacheable alias. Off the top of the kernel's range, above the panic log.
+    gpupool_base = phys_base + mem_size - gpupool
+    mem_size -= gpupool
     # Carve the panic log off the top so the kernel never allocates over it.
     panic_base = phys_base + mem_size - PANIC_LOG_SIZE
     mem_size -= PANIC_LOG_SIZE
@@ -137,7 +141,8 @@ def build(seed=None, qemu=False, highmem=False, bonito=None):
         ('mac-address-wifi0', bytes([0x02, 0x50, 0x49, 0x58, 0x45, 0x4c])),
         ('mac-address-bluetooth0', bytes([0x02, 0x50, 0x49, 0x58, 0x45, 0x4d])),
         ('mac-address-ethernet0', bytes([0x02, 0x50, 0x49, 0x58, 0x45, 0x4e])),
-    ] + ([('sweet-board', cstr('bonito'))] if bonito else []),  # bsd/dev/sweet_touch.c (0084)
+    ] + ([('sweet-board', cstr('bonito'))] if bonito else [])
+      + ([('sweet-gpu-pool', u64(gpupool_base) + u64(gpupool))] if gpupool else []),  # bsd/dev/sweet_touch.c (0084)
     [node('memory-map', [ph()]),
         # Local boot policy (kern_csr.c): SIP relaxed like `csrutil disable`
         # (lp-sip0: untrusted kexts, unrestricted FS, task_for_pid, kernel
@@ -267,7 +272,8 @@ def build(seed=None, qemu=False, highmem=False, bonito=None):
 
 if __name__ == '__main__':
     bonito = 'wide' if '--bonito-wide' in sys.argv else 'upper' if '--bonito' in sys.argv else None
-    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv, bonito=bonito)
+    gpupool = int(sys.argv[sys.argv.index('--gpupool') + 1], 0) << 20 if '--gpupool' in sys.argv else 0
+    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv, bonito=bonito, gpupool=gpupool)
     if '--gpufw' in sys.argv:
         # /chosen/gpufw,<file>: Adreno 615 firmware for bsd/dev/sweet_gpu.c (0086, boot-arg sweetgpu=1)
         fw_dir = sys.argv[sys.argv.index('--gpufw') + 1]
