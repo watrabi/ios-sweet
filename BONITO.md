@@ -266,3 +266,17 @@ Present: the GPU's 2D engine scales the full 1125x2436 frame into a 998x2160 box
 
 Opt-in: `GPU=1 tools/bonito-kernel-image.sh` adds the firmware to /chosen (`mkadt.py --gpufw`) and passes the boot-arg `sweetgpu=1`. Log lines start with "SWEET GPU:" and "SWEET FB:".
 Image: shim/out/shim-boot-0086-gpu.img (emmc root, touch, keys, 6 CPUs, GPU).
+
+**GPU PRESENT WORKS (2026-11-01, 0086 kernel, shim-boot-0086-gpu.img):** the kernel brings up the A615 and
+iOS frames are scaled onto the panel by the GPU's 2D engine (full status bar + dock visible).
+- zap PAS: INIT_IMAGE returned QCOM_SCM_INTERRUPTED (1) with interrupts on. Resuming means re-issuing
+  x0 = 1, the same args, and x6 = the x6 that TZ returned (Linux __scm_smc_do_quirk, ARM_SMCCC_QUIRK_QCOM_A6).
+  Using the returned x1 (0x82) as x0 HUNG THE WHOLE SoC. The fixed call needed 5 resumes; MEM_SETUP and AUTH_AND_RESET needed none.
+- ABL scans the splash out through DPU VIG0 (src 0x9c000000, stride 4320); the stride switches to 4352.
+- Bring-up ~1.2 s after the GMU boots. The GMU clock stays on XO (the 200 MHz switch doesn't take), and there is no perf/bw vote yet.
+- Debug aid: GPUDBG=<s> (boot-args sweetgpudbg=<s> ufslogsecs=1) delays the bring-up and logs plus paces every SMC.
+- Pitfall: iOS images need the iOS boot-args (now the default in bonito-kernel-image.sh). Without
+  unentitled_ios_sim_launch=1, launchd's exec fails with WRONG_PLATFORM and the kernel panics with CS_KILLED.
+- Pitfall: the bigger payload (firmware in the ADT) is placed by ABL inside the kernel's RAM range. shim/loader.c now
+  checks only the range it writes, and moves the payload otherwise.
+- Boot time: /sbin/mount (mount-phase-2) spends ~98 s looking for the APFS data volume our HFS+ root lacks.
