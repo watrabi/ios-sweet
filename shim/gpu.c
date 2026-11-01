@@ -103,7 +103,8 @@ static void branch_on(const char *name, uintptr_t reg)
 #define CB_FSYNR0	0x68
 
 #define GMU_SID		5		/* sdm670.dtsi: gmu iommus = <&adreno_smmu 5> */
-#define GMU_SID_MASK	0x400
+#define GMU_SID_MASK	0	/* bonito SMMU: IDR0.NUMSIDB = 3 (3-bit stream ids); a mask bit
+				   beyond that makes the SMR write be dropped (sm8150 used 0x400) */
 
 /* GMU page tables + buffers: verified-free RAM (memwalk), 1 MiB. */
 #define GMEM		0x170000000UL
@@ -178,6 +179,8 @@ static void map_pages(uintptr_t l3, uint32_t va, uintptr_t pa, uint32_t size)
 	}
 }
 
+static int gmu_smr_ok;
+
 static int smmu_setup(void)
 {
 	uint32_t nsmr = rd32(SMMU + 0x20) & 0xff, ncb = rd32(SMMU + 0x24) & 0xff;
@@ -220,9 +223,28 @@ static int smmu_setup(void)
 	wr32(SMMU + 0x68, 0);						/* TLBIALLNSNH */
 	wr32(SMMU + 0x70, 0);						/* TLBGSYNC */
 	wait_bit(SMMU + 0x74, 1, 0, 10);
+	/* Stage-2 run showed the SMR write did not stick (read back 0): probe it. */
+	con_hex2(" scr0", "cr0=", rd32(SMMU + 0x0), "acr=", rd32(SMMU + 0x10));
 	wr32(S2CR(smr), (uint32_t)cb);
-	wr32(SMR(smr), (1u << 31) | (GMU_SID_MASK << 16) | GMU_SID);
+	con_hex2(" s2cr", "wrote=", (uint32_t)cb, "read=", rd32(S2CR(smr)));
+	uint32_t want = (1u << 31) | (GMU_SID_MASK << 16) | GMU_SID;
+	wr32(SMR(smr), want);
+	con_hex2(" smr", "wrote=", want, "read=", rd32(SMR(smr)));
+	/* other encodings: no mask, then the id alone */
+	if (rd32(SMR(smr)) != want) {
+		wr32(SMR(smr), (1u << 31) | GMU_SID);
+		con_hex2(" smr", "nomask=", (1u << 31) | GMU_SID, "read=", rd32(SMR(smr)));
+		wr32(SMR(smr), GMU_SID);
+		con_hex2(" smr", "id only=", GMU_SID, "read=", rd32(SMR(smr)));
+		/* another SMR index */
+		int o = smr + 1 < (int)nsmr ? smr + 1 : 0;
+		wr32(SMR(o), want);
+		con_hex2(" smr+1", "idx=", (uint32_t)o, "read=", rd32(SMR(o)));
+		wr32(SMR(o), 0);
+		wr32(SMR(smr), want);
+	}
 	con_hex2(" now", "smr=", rd32(SMR(smr)), "sctlr=", rd32(c + CB_SCTLR));
+	gmu_smr_ok = rd32(SMR(smr)) == want;
 	return cb;
 }
 
@@ -598,6 +620,10 @@ static void gmu_power_up(void)
 	con_hex2(rc ? " sptprac FAIL" : " sptprac on", "status=", rd32(GMU_REG(GMU_SPTPRAC_STATUS)), 0, 0);
 
 	/* a6xx_gmu_hfi_start: the GMU sets up its queues before any message */
+	if (!gmu_smr_ok) {
+		con_str("STOP", "GMU stream has no SMR - DRAM access would reset the SoC");
+		return;
+	}
 	step("HFI_CTRL_INIT");
 	wr32(GMU_REG(GMU_HFI_CTRL_INIT), 1);
 	rc = wait_bit(GMU_REG(GMU_HFI_CTRL), 1, 1, 100);
