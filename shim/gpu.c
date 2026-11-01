@@ -113,10 +113,12 @@ static void branch_on(const char *name, uintptr_t reg)
 #define GMEM_DUMMY	(GMEM + 0x90000)
 #define GMEM_LOG	(GMEM + 0x91000)
 #define GMEM_HFI	(GMEM + 0x95000)
+#define GMEM_DEBUG	(GMEM + 0x99000)
 #define GMEM_SIZE	0x100000UL
 #define VA_DUMMY	0x60000000u
 #define VA_LOG		0x60001000u
 #define VA_HFI		0x60005000u
+#define VA_DEBUG	0x60009000u	/* legacy GMU debug buffer (mainline gmu->debug) */
 
 /* a6xx_gmu.c: rscc = gmu->mmio + 0x23000 before A650; sdm670.dtsi gmu_pdc / gmu_pdc_seq */
 #define RSCC		(0x0506a000UL + 0x23000)
@@ -146,6 +148,7 @@ static void branch_on(const char *name, uintptr_t reg)
 #define GMU_CHIPID	0x06015000u	/* chip 0x06010500 in the GMU's packing */
 
 extern const uint8_t gmu_fw[], gmu_fw_end[];
+static void gmu_power_up(void);
 
 /* PC-relative address of an embedded symbol: keeps the compiler from folding
  * symbol arithmetic into an absolute literal (the shim is not relocated). */
@@ -201,6 +204,7 @@ static int smmu_setup(void)
 	map_pages(GMEM_L3_6, VA_DUMMY, GMEM_DUMMY, 0x1000);
 	map_pages(GMEM_L3_6, VA_LOG, GMEM_LOG, 0x4000);
 	map_pages(GMEM_L3_6, VA_HFI, GMEM_HFI, 0x4000);
+	map_pages(GMEM_L3_6, VA_DEBUG, GMEM_DEBUG, 0x4000);
 
 	uintptr_t c = SMMU_CB(cb);
 	wr32(c + CB_SCTLR, 0);
@@ -374,6 +378,255 @@ static void gmu_boot(void)
 	con_hex2(" cb", "fsr=", rd32(c + CB_FSR), "far=", rd32(c + CB_FAR));
 	con_hex2(" cb", "fsynr0=", rd32(c + CB_FSYNR0), "gfsr=", rd32(SMMU + 0x48));
 	con_hex2(" log", "[0]=", rd32(GMEM_LOG), "[1]=", rd32(GMEM_LOG + 4));
+	if (!ok)
+		return;
+	con_str("NEXT", "stage 3 on a new page in 20 s (photo this one)");
+	mdelay(20000);
+	con_clear(RED);
+	gmu_power_up();
+}
+
+/* ---- stage 3: legacy power-up: GX rail, SPTPRAC, HFI v1, OOB GPU ---- */
+
+#define GMU_BOOT_SLUMBER	0x1cbf8
+#define GMU_GX_VOTE_IDX		0x1cbf9
+#define GMU_MX_VOTE_IDX		0x1cbfa
+#define GMU_SPTPRAC_CTRL	0x1a881
+#define GMU_SPTPRAC_STATUS	0x1f8d0
+#define GMU_G2H_CLR		0x1f991
+#define GMU_G2H_INFO		0x1f992
+#define GMU_H2G_SET		0x1f994
+#define QHDR(q)			(GMEM_HFI + 24 + 48 * (q))
+#define QDATA(q)		(GMEM_HFI + 0x1000 * ((q) + 1))
+#define QSIZE			1024
+#define CMD_DB			0x85fe0000UL	/* sdm670.dtsi aop_cmd_db_mem (qcom,cmd-db) */
+
+/* sdm670.dtsi GPU OPPs every speed bin has (opp-supported-hw 0xf), "off" first. */
+#define NGPU 4
+static const uint32_t gpu_khz[NGPU] = { 0, 267000, 355000, 430000 };
+static const uint32_t gpu_lvl[NGPU] = { 0, 64 /* LOW_SVS */, 128 /* SVS */, 192 /* SVS_L1 */ };
+static const uint32_t gmu_khz[2] = { 0, 200000 };
+static const uint32_t gmu_lvl[2] = { 0, 48 /* MIN_SVS */ };
+
+static uint32_t hfi_seq;
+
+static int cmddb_aux(const char *id, uintptr_t *aux, uint32_t *len)
+{
+	uintptr_t db = CMD_DB;
+	if (rd32(db + 4) != 0x0c0330db)
+		return -1;
+	uintptr_t data = db + 4 + 4 + 8 * 16 + 4 + 4;
+	for (int r = 0; r < 8; r++) {
+		uintptr_t rh = db + 8 + 16 * (uintptr_t)r;
+		uint32_t w0 = rd32(rh), w1 = rd32(rh + 4);
+		uint32_t hoff = w0 >> 16, doff = w1 & 0xffff, cnt = w1 >> 16;
+		for (uint32_t e = 0; e < cnt; e++) {
+			uintptr_t ent = data + hoff + 24 * e;
+			int match = 1;
+			for (int i = 0; i < 8; i++) {
+				char c = (char)(rd32(ent + (uintptr_t)(i & ~3)) >> (8 * (i & 3)));
+				if (c != id[i]) {
+					match = 0;
+					break;
+				}
+				if (!id[i])
+					break;
+			}
+			if (!match)
+				continue;
+			uint32_t w5 = rd32(ent + 20);
+			*len = w5 & 0xffff;
+			*aux = data + doff + (w5 >> 16);
+			return 0;
+		}
+	}
+	return -1;
+}
+
+static uint32_t aux16(uintptr_t aux, uint32_t i)
+{
+	return (rd32(aux + 2 * (i & ~1u)) >> (16 * (i & 1))) & 0xffff;
+}
+
+/* a6xx_gmu_rpmh_arc_votes_init */
+static int arc_votes(uint32_t *votes, const uint32_t *lvl, int n, const char *pri_id, const char *sec_id)
+{
+	uintptr_t pri, sec;
+	uint32_t plen, slen;
+	if (cmddb_aux(pri_id, &pri, &plen) || cmddb_aux(sec_id, &sec, &slen))
+		return -1;
+	plen /= 2;
+	slen /= 2;
+	for (int i = 0; i < n; i++) {
+		uint32_t pindex = 0, sindex = 0, j;
+		for (j = 0; j < plen; j++)
+			if (aux16(pri, j) >= lvl[i]) {
+				pindex = j;
+				break;
+			}
+		if (j == plen)
+			return -2;
+		for (j = 0; j < slen; j++) {
+			if (aux16(sec, j) >= lvl[i]) {
+				sindex = j;
+				break;
+			} else if (aux16(sec, j)) {
+				sindex = j;
+			}
+		}
+		votes[i] = (aux16(pri, pindex) << 16) | (sindex << 8) | pindex;
+	}
+	return 0;
+}
+
+static int hfi_send(uint32_t id, uint32_t *msg, uint32_t dwords)
+{
+	uint32_t seq = ++hfi_seq;
+	msg[0] = (seq << 20) | (dwords << 8) | id;
+	uintptr_t h = QHDR(0);
+	uint32_t w = rd32(h + 44);
+	for (uint32_t i = 0; i < dwords; i++) {
+		wr32(QDATA(0) + 4 * w, msg[i]);
+		w = (w + 1) % QSIZE;
+	}
+	for (; w % 4; w = (w + 1) % QSIZE)
+		wr32(QDATA(0) + 4 * w, 0xfafafafa);
+	wr32(h + 44, w);
+	wr32(GMU_REG(GMU_H2G_SET), 1);
+	for (int t = 0; t < 1000; t++) {
+		if (rd32(GMU_REG(GMU_G2H_INFO)) & 1) {
+			wr32(GMU_REG(GMU_G2H_CLR), 1);
+			uintptr_t rh = QHDR(1);
+			while (rd32(rh + 40) != rd32(rh + 44)) {
+				uint32_t r = rd32(rh + 40), hdr = rd32(QDATA(1) + 4 * r);
+				uint32_t n = (hdr >> 8) & 0xff, buf[8] = { 0 };
+				for (uint32_t i = 0; i < n; i++) {
+					uint32_t v = rd32(QDATA(1) + 4 * r);
+					if (i < 8)
+						buf[i] = v;
+					r = (r + 1) % QSIZE;
+				}
+				r = ((r + 3) & ~3u) % QSIZE;
+				wr32(rh + 40, r);
+				if ((hdr & 0xff) != 100 && (buf[1] >> 20) == seq)
+					return (int)buf[2];
+			}
+		}
+		mdelay(1);
+	}
+	return -1000;
+}
+
+/* legacy a6xx_gmu_set_oob: request bit -> ack bit in GMU2HOST_INTR_INFO */
+static int oob(unsigned req, unsigned ack)
+{
+	wr32(GMU_REG(GMU_H2G_SET), 1u << req);
+	int rc = wait_bit(GMU_REG(GMU_G2H_INFO), 1u << ack, 1, 1000);
+	wr32(GMU_REG(GMU_G2H_CLR), 1u << ack);
+	return rc;
+}
+
+static void gmu_power_up(void)
+{
+	static uint32_t msg[192];
+	uint32_t gx[NGPU], cx[2];
+	int rc;
+
+	con_line("GPU stage 3  legacy power-up: GX rail, SPTPRAC, HFI v1, OOB GPU", GREEN);
+	con_hex2("CMDDB", "at=", (uint32_t)CMD_DB, "magic=", rd32(CMD_DB + 4));
+	if ((rc = arc_votes(gx, gpu_lvl, NGPU, "gfx.lvl", "mx.lvl")) ||
+	    (rc = arc_votes(cx, gmu_lvl, 2, "cx.lvl", "mx.lvl"))) {
+		con_hex("CMDDB fail", (uint32_t)rc);
+		return;
+	}
+	con_hex2("VOTES", "gx_max=", gx[NGPU - 1], "cx=", cx[1]);
+
+	/* a6xx_gmu_gfx_rail_on: max-level indices + OOB BOOT_SLUMBER (22 -> 30) */
+	con_str("STEP", "gfx rail on (OOB boot-slumber)");
+	wr32(GMU_REG(GMU_BOOT_SLUMBER), 0);
+	wr32(GMU_REG(GMU_GX_VOTE_IDX), gx[NGPU - 1] & 0xff);
+	wr32(GMU_REG(GMU_MX_VOTE_IDX), (gx[NGPU - 1] >> 8) & 0xff);
+	rc = oob(22, 30);
+	con_hex2(rc ? " slumber TIMEOUT" : " slumber acked", "info=", rd32(GMU_REG(GMU_G2H_INFO)), "rpmh=", rd32(GMU_REG(GMU_RPMH_STATE)));
+
+	/* a6xx_sptprac_enable */
+	con_str("STEP", "SPTPRAC enable");
+	wr32(GMU_REG(GMU_SPTPRAC_CTRL), 0x778000);
+	rc = -1;
+	for (int i = 0; i < 100; i++)
+		if ((rd32(GMU_REG(GMU_SPTPRAC_STATUS)) & 0x38) == 0x28) {
+			rc = 0;
+			break;
+		} else
+			mdelay(1);
+	con_hex2(rc ? " sptprac FAIL" : " sptprac on", "status=", rd32(GMU_REG(GMU_SPTPRAC_STATUS)), 0, 0);
+
+	/* a6xx_hfi_start_v1 */
+	con_str("STEP", "HFI v1: init, version, perf, bw, test");
+	for (int i = 0; i < 192; i++)
+		msg[i] = 0;
+	msg[1] = 0;			/* seg_id */
+	msg[2] = VA_DEBUG;
+	msg[3] = 0x4000;
+	msg[4] = 1;			/* GMU_COLD_BOOT */
+	int r_init = hfi_send(0, msg, 5);
+	msg[1] = 1;			/* supported_version */
+	int r_ver = hfi_send(1, msg, 2);
+	for (int i = 0; i < 192; i++)
+		msg[i] = 0;
+	msg[1] = NGPU;
+	msg[2] = 2;
+	for (int i = 0; i < NGPU; i++) {
+		msg[3 + 2 * i] = gx[i];
+		msg[4 + 2 * i] = gpu_khz[i];
+	}
+	for (int i = 0; i < 2; i++) {
+		msg[3 + 32 + 2 * i] = cx[i];
+		msg[4 + 32 + 2 * i] = gmu_khz[i];
+	}
+	int r_perf = hfi_send(4, msg, 3 + 32 + 8);
+	for (int i = 0; i < 192; i++)
+		msg[i] = 0;
+	/* a6xx_build_bw_table (default A6xx gen1, A615 uses it) */
+	msg[1] = 1;			/* bw_level_num */
+	msg[2] = 3;			/* cnoc_cmds_num */
+	msg[3] = 3;			/* ddr_cmds_num */
+	msg[4] = 0x05;			/* cnoc_wait_bitmask */
+	msg[5] = 0x07;			/* ddr_wait_bitmask */
+	msg[6] = 0x50034;		/* cnoc addrs [6] */
+	msg[7] = 0x5007c;
+	msg[8] = 0x5004c;
+	msg[12] = 0x40000000;		/* cnoc data [2][6] */
+	msg[13] = 0x00000000;
+	msg[14] = 0x40000000;
+	msg[18] = 0x60000001;
+	msg[19] = 0x20000001;
+	msg[20] = 0x60000001;
+	msg[24] = 0x50000;		/* ddr addrs [8] */
+	msg[25] = 0x5005c;
+	msg[26] = 0x5000c;
+	msg[32] = 0x40000000;		/* ddr data [16][8] */
+	msg[33] = 0x40000000;
+	msg[34] = 0x40000000;
+	int r_bw = hfi_send(3, msg, 32 + 128);
+	int r_test = hfi_send(5, msg, 1);
+	con_hex2("HFI", "init=", (uint32_t)r_init, "ver=", (uint32_t)r_ver);
+	con_hex2(" hfi", "perf=", (uint32_t)r_perf, "bw=", (uint32_t)r_bw);
+	con_hex2(" hfi", "test=", (uint32_t)r_test, "ctrl=", rd32(GMU_REG(GMU_HFI_CTRL)));
+
+	/* OOB GPU_SET (legacy 16 -> 24): the GMU powers the GX side */
+	con_str("STEP", "OOB GPU_SET");
+	rc = oob(16, 24);
+	con_hex2(rc ? " gpu_set TIMEOUT" : " gpu_set acked", "gx_gdsc=", rd32(GPUCC + GPUCC_GX_GDSCR), "info=", rd32(GMU_REG(GMU_G2H_INFO)));
+	con_hex2(" gcc", "memnoc=", rd32(GCC + 0x7100c), "snoc=", rd32(GCC + 0x71018));
+	if (!(rd32(GPUCC + GPUCC_GX_GDSCR) & (1u << 31))) {
+		con_str("GX", "not powered - not touching GPU registers");
+		return;
+	}
+	con_str("STEP", "GPU registers (GX side)");
+	con_hex2("RBBM", "status=", rd32(GPU + 4 * 0x210), "chipid=", rd32(GPU + 4 * 0x885));
+	wr32(GPU + 4 * 0x883, 0x41445245);
+	con_hex2("SCRATCH0", "now=", rd32(GPU + 4 * 0x883), "want=", 0x41445245);
 }
 
 void gpu_probe(void)
