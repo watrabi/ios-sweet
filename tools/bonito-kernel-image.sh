@@ -34,7 +34,7 @@ if [ "${METAL:-0}" = 1 ]; then flag="$flag --gpupool ${GPUPOOL_MB:-512}"; fi
 python3 tools/mkadt.py $O/bonito-$MEM.adt $flag 2>/dev/null
 
 # The iOS root needs these (launchd exec on this macOS-target kernel, rw root, fb); IOS=0 to omit.
-IOSARGS="unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1 ufsrw=1 rootrw=1 sweetfb_noconsole=1 sweetfb_hz=30"
+IOSARGS="unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1 ufsrw=1 rootrw=1 sweetfb_noconsole=1 sweetfb_hz=${FBHZ:-60}"
 if [ "${ROOT:-md}" = emmc ] && [ "${IOS:-1}" = 1 ]; then EXTRA="$IOSARGS $EXTRA"; fi
 if [ "${ROOT:-md}" = emmc ]; then RD=rd=ufsroot0; RDARG=(); else RD=rd=md0; RDARG=(--ramdisk $O/sweet-init); fi
 ARGS="debug=0xc serial=3 cpus=${CPUS:-8} keepsyms=1 -enable_kprintf_spam -noprogress $RD"
