@@ -201,3 +201,17 @@ Run (after the user unlocks the bootloader - `fastboot flashing unlock` WIPES An
   CPU renderer can't draw it). mediaserverd sig 6 once; vmd burns ~60% CPU.
 - Next: keys (power/volume: PM660 PON + PM660L GPIO 7) so the display can be woken; RTC; USB networking;
   cpufreq; black-app investigation with sweetsample=.
+
+## GPU bring-up (Adreno 615), shim probes - port of ios-flame's shim/gpuprobe.c
+- Firmware pulled from the phone's vendor_b (TWRP, read-only mount): a615_zap.{mdt,b00,b01,b02,elf},
+  a630_gmu.bin (32768 B), a630_sqe.fw -> research/gpu/fw (gitignored).
+- **Stage 1 OK** (shim-gpu1.img): CX GDSC on (0xf8222000), gmu_clk_src = XO, cxo/cx_gmu on, GMU ITCM/DTCM
+  writable, Adreno SMMU (0x5040000) ID regs readable: cr0 0x200626 idr0 0x48016605 (5 SMRs) idr1
+  0x20008005 (5 CBs). gpu_memnoc_gfx / gpu_snoc_dvm_gfx branches stay halted (GX side off).
+- **Stage 2 OK** (shim-gpu2.img, commit dfd5908): SMR0/CB0 for GMU stream 5 (all 5 SMRs were free,
+  s2cr 0x200ff), RSCC at 0x508d000 + PDC 0xb280000/PDC_SEQ 0xb480000 programmed (A615 PDC offset
+  0x30080), PDC enable 0x80000001; legacy load of a630_gmu.bin into ITCM; **GMU BOOTED, init 0xbabeface**,
+  no SMMU fault (FSR 0x400 = format bits only). **RSC wake ack (GMU_RSCC_CONTROL_ACK bit 1) TIMED OUT**
+  (status0 0x01000000, seq idle) - mainline treats that as an error; likely relevant for GX power (stage 3).
+- Next (stage 3, legacy path): investigate the RSC ack, then gfx_rail_on + sptprac_enable, legacy HFI
+  (v1) start, OOB GPU set -> GX GDSC on; then zap shader (TZ PAS, a615_zap), SQE, ring, first commands.
