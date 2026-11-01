@@ -185,3 +185,19 @@ Run (after the user unlocks the bootloader - `fastboot flashing unlock` WIPES An
   with a known-blue UI element later). No touch/keys yet (drivers disabled by boot-args).
 - Next: touch (Synaptics RMI4 @ i2c9 0x20, 1.8 V via PM660 GPIO 12), keys (PON + PM660L GPIO 7), RTC,
   USB networking (ios-flame 0088-0091), cpufreq (OSM, ios-flame 0086), wallpaper investigation.
+
+## TOUCH WORKS (2026-11-01 ~02:10 UTC) - patch 0084, CI run 41263318374 (kernel xnu/out-0084)
+- Shim probe first (shim-touch.img, -DTOUCHPROBE): PM660 GPIO12 apid 0x4c (apps-owned, LV subtype 0x10,
+  was enabled input) -> mode 1 / DIG_OUT_SOURCE 0x80 / EN 0x80 = 1.8 V on; GENI I2C fw 0x300 left by ABL;
+  RMI4 @0x20: F34 (q 0x24), F01 (q 0x2c, cmd 0x23, ctrl 0x0d, data 0x06), F12 (q 0x4b, ctrl 0x13,
+  data 0x08), product S3706B, F01 status 0x81; F12 data = 8-byte objects in panel pixels.
+- iOS boot shim-boot-0084-ios-touch.img (TOUCH=1 CPUS=6): `SWEET TOUCH: selected Synaptics S3706B (RMI4,
+  status 0x81), 1080x2160, poll=10ms`; user unlocked with an edge swipe, touches land correctly, opened
+  Settings, swiped home. Log logs/boot-0084-touch.txt.
+- Re-opening Settings (resume of the suspended app, no new exec) showed a black screen: display on, no
+  crash in SpringBoard/backboardd, touches still delivered. Upstream NOTES records the same class of
+  issue on sweet ("Phone/Photos/Messages show black, no crash") - userland CPU rendering, not the port.
+- PosterBoard crashes (sig 5) -> no lock-screen wallpaper (ios-flame HANDOFF: default wallpaper is HEIC,
+  CPU renderer can't draw it). mediaserverd sig 6 once; vmd burns ~60% CPU.
+- Next: keys (power/volume: PM660 PON + PM660L GPIO 7) so the display can be woken; RTC; USB networking;
+  cpufreq; black-app investigation with sweetsample=.
