@@ -61,6 +61,10 @@ jobs:
           #define ECDSA_PRIV_FILENAME "/private/etc/dropbear/dropbear_ecdsa_host_key"
           #define ED25519_PRIV_FILENAME "/private/etc/dropbear/dropbear_ed25519_host_key"
           EOF
+          # single root user on a multi-user kernel: drop the sanity check that refuses that (ios-flame did the same)
+          grep -rl "requires a non-multiuser kernel" src . 2>/dev/null | sort -u | while read f; do
+            sed -i '' 's/dropbear_exit("Non-multiuser Dropbear requires a non-multiuser kernel");/(void)0;/' "$f"; done
+          ! grep -rq 'dropbear_exit("Non-multiuser' src . 2>/dev/null
           CC="$IOSCC" ./configure --host=aarch64-apple-darwin --disable-zlib --disable-syslog --disable-lastlog \
             --disable-utmp --disable-utmpx --disable-wtmp --disable-wtmpx --disable-loginfunc \
             --disable-pututline --disable-pututxline --disable-harden > ../dropbear-configure.log 2>&1 ||
