@@ -39,6 +39,8 @@ ARGS="debug=0xc serial=3 cpus=${CPUS:-1} keepsyms=1 -enable_kprintf_spam -noprog
 if [ "${TOUCH:-0}" = 1 ]; then TOUCHARG=""; else TOUCHARG="sweettouch=0 "; fi
 if [ "${KEYS:-0}" = 1 ]; then KEYSARG=""; else KEYSARG="sweetkeys=0 "; fi
 if [ "${GPU:-0}" = 1 ]; then GPUARG="sweetgpu=1 "; else GPUARG=""; fi
+# GPUDBG=<s>: GPU bring-up that long after boot, TZ calls logged + paced, log flushed every second
+if [ -n "${GPUDBG:-}" ]; then GPUARG="${GPUARG}sweetgpudbg=$GPUDBG ufslogsecs=1 "; fi
 ARGS="$ARGS ${TOUCHARG}${KEYSARG}${GPUARG}sweetusb=0 wdt=-1 wdt_test=no_user_checkin $EXTRA"
 python3 tools/mkpayload.py "$K" $O/bonito-$MEM.adt $O/payload-xnu.bin "${RDARG[@]}" --cmdline "$ARGS"
 (cd shim && ./build.sh ../$O/payload-xnu.bin >/dev/null)

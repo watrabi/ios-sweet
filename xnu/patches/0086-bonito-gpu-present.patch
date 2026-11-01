@@ -1172,10 +1172,10 @@ index 0000000..3bb9f03
 +#endif
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 new file mode 100644
-index 0000000..c6cf4ad
+index 0000000..9aa623f
 --- /dev/null
 +++ b/bsd/dev/sweet_gpu.c
-@@ -0,0 +1,452 @@
+@@ -0,0 +1,478 @@
 +/*
 + * The Adreno 615 (bonito; ported from ios-flame's Adreno 640 glue, MIT) in the kernel: the environment for the shared core
 + * (sweet_a6xx.c, also built into the userland tool phone/gpu), bring-up in
@@ -1232,6 +1232,9 @@ index 0000000..c6cf4ad
 +int sweet_display_fit_x, sweet_display_fit_w;
 +
 +static struct a6_gpu gpu;
++/* boot-arg sweetgpudbg=<seconds>: start the bring-up that long after init and pause around
++ * TrustZone calls so the persistent log (ufslogsecs=1) catches a hang. */
++static uint32_t gpu_dbg;
 +static vm_offset_t pool_kva;
 +static volatile bool gpu_ready;
 +static LCK_GRP_DECLARE(sweet_gpu_grp, "sweet_gpu");
@@ -1373,13 +1376,25 @@ index 0000000..c6cf4ad
 +	x[3] = x3;
 +}
 +
++extern int cpu_number(void);
++extern void _disable_preemption(void);
++extern void _enable_preemption(void);
++extern void IOSleep(unsigned int ms);
++
 +void
 +a6_smc(uint64_t x[8])
 +{
++	if (gpu_dbg) {
++		a6_log("smc %llx args %llx %llx %llx %llx on cpu %d\n", x[0], x[1], x[2], x[3], x[4], cpu_number());
++		IOSleep(2500);
++	}
 +	for (int busy = 0; busy < 20; busy++) {
 +		uint64_t r[8];
 +		uint64_t cmd = x[0];
 +		unsigned resumes = 0;
++		/* Stay on this CPU while TZ holds an interrupted call (interrupts still taken). */
++		_disable_preemption();
++		int cpu0 = cpu_number();
 +		do {
 +			memcpy(r, x, sizeof(r));
 +			r[0] = cmd;
@@ -1389,6 +1404,12 @@ index 0000000..c6cf4ad
 +				resumes++;
 +			}
 +		} while (r[0] == SCM_INTERRUPTED && resumes < 100000);
++		int cpu1 = cpu_number();
++		_enable_preemption();
++		if (gpu_dbg) {
++			a6_log("smc -> %llx %llx after %u resumes (cpu %d..%d)\n", r[0], r[1], resumes, cpu0, cpu1);
++			IOSleep(2500);
++		}
 +		if (r[0] != SCM_EBUSY) {
 +			memcpy(x, r, 4 * sizeof(uint64_t));
 +			return;
@@ -1420,6 +1441,10 @@ index 0000000..c6cf4ad
 +static void
 +gpu_thread(void *arg __unused, wait_result_t wr __unused)
 +{
++	if (gpu_dbg) {
++		a6_log("debug: bring-up in %u s\n", gpu_dbg);
++		IOSleep(gpu_dbg * 1000);
++	}
 +	uint64_t t0 = mach_absolute_time(), ns;
 +	lck_mtx_lock(&sweet_gpu_lock);
 +	int rc = a6_power_up(&gpu);
@@ -1443,6 +1468,7 @@ index 0000000..c6cf4ad
 +	if (!on) {
 +		return;
 +	}
++	PE_parse_boot_argn("sweetgpudbg", &gpu_dbg, sizeof(gpu_dbg));
 +	vm_offset_t va = 0;
 +	if (kmem_alloc_contig(kernel_map, &va, A6_POOL_SIZE, PAGE_MASK, 0, (ppnum_t)(atop_64(A6_POOL_ALIGN) - 1),
 +	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
