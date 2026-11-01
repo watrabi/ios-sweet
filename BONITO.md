@@ -105,7 +105,8 @@ Three boots 2026-10-31:
   0xc0ff8080, EXT_CSD rev 8, 122142720 sectors, cache off` / `high speed 48 MHz, 8-bit bus` / `"userdata" on
   LUN 0: first block 0x211c80, 51163 MiB, read-only, DMA at 0xa5f1c000` / `BSD root: ufsroot0` ->
   hfs: unknown Volume Signature e93f -> cannot mount root (expected: userdata holds no HFS yet).
-- Patch 0083 = ios-flame's iig fix; macos-15 test build run 41255314009.
+- Patch 0083 = ios-flame's iig fix. **macos-15 build works**: run 41255314009 (commit 953e524, macOS 15.8.2,
+  Xcode 16.0) success in ~7 min. Its kernel is not hardware-tested yet; then make macos-15 the default runner.
 - Transport inside sweet_ufs.c selected by ADT /sweet-emmc (mkadt --bonito); same sequence as the shim.
 - First test (read-only, safe): `ROOT=emmc tools/bonito-kernel-image.sh xnu/out/<new kernel> wide` ->
   expect `SWEET EMMC: ... high speed 48 MHz, 8-bit bus` and `SWEET EMMC: "userdata" ... read-only`,
