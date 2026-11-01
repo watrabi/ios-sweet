@@ -252,3 +252,17 @@ Run (after the user unlocks the bootloader - `fastboot flashing unlock` WIPES An
   + the metal2vulkan bridge for iOS on a macOS CI runner and install them into the root image.
 - Earlier plan for stage 3: then gfx_rail_on + sptprac_enable, legacy HFI
   (v1) start, OOB GPU set -> GX GDSC on; then zap shader (TZ PAS, a615_zap), SQE, ring, first commands.
+
+### Kernel GPU driver (patch 0086)
+
+Port of ios-flame's 0095 to the A615, using the sequence proven by shim/gpu.c:
+- legacy GMU: the whole a630_gmu.bin is loaded into ITCM, queue ids are 0/4/5, no HFI messages are sent;
+- GX power comes from the BOOT_SLUMBER OOB, then SPTPRAC, then the GPU_SET OOB;
+- SMRs have no mask; PDC 0xb280000 with offset 0x30080; gen1 VBIF hw_init;
+- zap (a615) at 0x97a15000; the SMC is inline (bonito has no /dev/pmem);
+- also includes flame's `-mcpu=cortex-a55+crypto` fix (Apple clang otherwise emits EOR3).
+
+Present: the GPU's 2D engine scales the full 1125x2436 frame into a 998x2160 box at x 41. The panel stride becomes 4352: every DPU pipe whose SRC0 points into the framebuffer gets the new stride, then CTL0 is flushed.
+
+Opt-in: `GPU=1 tools/bonito-kernel-image.sh` adds the firmware to /chosen (`mkadt.py --gpufw`) and passes the boot-arg `sweetgpu=1`. Log lines start with "SWEET GPU:" and "SWEET FB:".
+Image: shim/out/shim-boot-0086-gpu.img (emmc root, touch, keys, 6 CPUs, GPU).
