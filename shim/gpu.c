@@ -462,6 +462,7 @@ static const uint32_t gmu_khz[2] = { 0, 200000 };
 static const uint32_t gmu_lvl[2] = { 0, 48 /* MIN_SVS */ };
 
 static uint32_t hfi_seq;
+static uint32_t hfi_err[4];	/* last F2H_MSG_ERROR (id 100): header, words 1..3 */
 
 /*
  * Breadcrumb in RAM that survives a warm reset (memwalk-verified, outside
@@ -590,7 +591,12 @@ static int hfi_send(uint32_t id, uint32_t *msg, uint32_t dwords)
 				}
 				r = ((r + 3) & ~3u) % QSIZE;
 				wr32(rh + 40, r);
-				if ((hdr & 0xff) != 100 && (buf[1] >> 20) == seq)
+				if ((hdr & 0xff) == 100) {
+					for (int k = 0; k < 4; k++)
+						hfi_err[k] = buf[k];
+					continue;
+				}
+				if ((buf[1] >> 20) == seq)
 					return (int)buf[2];
 			}
 		}
@@ -675,6 +681,17 @@ static void gmu_power_up(void)
 		con_hex2(" cb", "fsr=", rd32(cbr + CB_FSR), "far=", rd32(cbr + CB_FAR));
 		con_hex2(" cb", "fsynr0=", rd32(cbr + CB_FSYNR0), "gfsr=", rd32(SMMU + 0x48));
 	}
+	mdelay(200);	/* let the firmware finish writing whatever it reports */
+	con_hex2(" f2h err", "hdr=", hfi_err[0], "w1=", hfi_err[1]);
+	con_hex2(" f2h err", "w2=", hfi_err[2], "w3=", hfi_err[3]);
+	con_hex2(" gmu", "init_res=", rd32(GMU_REG(GMU_INIT_RESULT)), "rpmh=", rd32(GMU_REG(GMU_RPMH_STATE)));
+	con_hex2(" rsc", "status0=", rd32(RSCC_REG(0x0004)), "seqbusy=", rd32(RSCC_REG(0x0101)));
+	con_hex2(" pdc", "enable=", rd32(PDC_REG(0x1140)), "cx_busy=", rd32(GMU_REG(GMU_CX_BUSY)));
+	con_hex2(" log", "[0]=", rd32(GMEM_LOG), "[1]=", rd32(GMEM_LOG + 4));
+	con_hex2(" log", "[2]=", rd32(GMEM_LOG + 8), "[3]=", rd32(GMEM_LOG + 12));
+	con_hex2(" dbg", "[0]=", rd32(GMEM_DEBUG), "[1]=", rd32(GMEM_DEBUG + 4));
+	con_hex2(" dbg", "[2]=", rd32(GMEM_DEBUG + 8), "[3]=", rd32(GMEM_DEBUG + 12));
+	con_hex2(" dcache", "[0]=", rd32(GMEM_DCACHE), "[1]=", rd32(GMEM_DCACHE + 4));
 	msg[1] = 1;			/* supported_version */
 	crumb("HFI msg 1 version");
 	int r_ver = hfi_send(1, msg, 2);
