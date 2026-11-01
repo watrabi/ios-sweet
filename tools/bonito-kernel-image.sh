@@ -26,6 +26,8 @@ ${CROSS}objcopy -O binary -j .text $O/init.o $O/init.text
 python3 tools/mkinit.py --raw $O/init.text 0 $O/sweet-init
 
 if [ "$MEM" = wide ]; then flag=--bonito-wide; else flag=--bonito; fi
+# GPU=1: Adreno 615 firmware into /chosen + boot-arg sweetgpu=1 (patch 0086)
+if [ "${GPU:-0}" = 1 ]; then flag="$flag --gpufw research/gpu/fw"; fi
 python3 tools/mkadt.py $O/bonito-$MEM.adt $flag 2>/dev/null
 
 if [ "${ROOT:-md}" = emmc ]; then RD=rd=ufsroot0; RDARG=(); else RD=rd=md0; RDARG=(--ramdisk $O/sweet-init); fi
@@ -33,7 +35,8 @@ ARGS="debug=0xc serial=3 cpus=${CPUS:-1} keepsyms=1 -enable_kprintf_spam -noprog
 # TOUCH=1: enable the bonito RMI4 touch driver (patch 0084); keys/USB stay off.
 if [ "${TOUCH:-0}" = 1 ]; then TOUCHARG=""; else TOUCHARG="sweettouch=0 "; fi
 if [ "${KEYS:-0}" = 1 ]; then KEYSARG=""; else KEYSARG="sweetkeys=0 "; fi
-ARGS="$ARGS ${TOUCHARG}${KEYSARG}sweetusb=0 wdt=-1 wdt_test=no_user_checkin $EXTRA"
+if [ "${GPU:-0}" = 1 ]; then GPUARG="sweetgpu=1 "; else GPUARG=""; fi
+ARGS="$ARGS ${TOUCHARG}${KEYSARG}${GPUARG}sweetusb=0 wdt=-1 wdt_test=no_user_checkin $EXTRA"
 python3 tools/mkpayload.py "$K" $O/bonito-$MEM.adt $O/payload-xnu.bin "${RDARG[@]}" --cmdline "$ARGS"
 (cd shim && ./build.sh ../$O/payload-xnu.bin >/dev/null)
 mv $O/shim-boot.img $O/shim-boot-xnu.img

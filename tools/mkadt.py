@@ -263,6 +263,12 @@ def build(seed=None, qemu=False, highmem=False, bonito=None):
 if __name__ == '__main__':
     bonito = 'wide' if '--bonito-wide' in sys.argv else 'upper' if '--bonito' in sys.argv else None
     root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv, bonito=bonito)
+    if '--gpufw' in sys.argv:
+        # /chosen/gpufw,<file>: Adreno 615 firmware for bsd/dev/sweet_gpu.c (0086, boot-arg sweetgpu=1)
+        fw_dir = sys.argv[sys.argv.index('--gpufw') + 1]
+        chosen = next(c for c in root.children if dict((k, v) for k, f, v in c.props).get('name') == b'chosen\0')
+        for name in ('a630_gmu.bin', 'a630_sqe.fw', 'a615_zap.mdt', 'a615_zap.b02'):
+            chosen.props.append(('gpufw,' + name, 0, open(os.path.join(fw_dir, name), 'rb').read()))
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:
