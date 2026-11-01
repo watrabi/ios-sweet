@@ -43,8 +43,8 @@ import plistlib, sys
 p = plistlib.load(open(sys.argv[1], 'rb'))
 p['LaunchDaemons']['/System/Library/LaunchDaemons/org.bonito.dropbear.plist'] = {
     'Label': 'org.bonito.dropbear',
-    # -R: host keys made on first use; -E: log to stderr; -F: foreground for launchd
-    'ProgramArguments': ['/var/local/bin/dropbear', '-F', '-E', '-R', '-p', '22'],
+    # -R: host keys made on first use; -F: foreground for launchd (no -E: this build has no syslog)
+    'ProgramArguments': ['/var/local/bin/dropbear', '-F', '-R', '-p', '22'],
     'RunAtLoad': True, 'KeepAlive': True, 'UserName': 'root',
     'EnvironmentVariables': {'PATH': '/var/local/bin:/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': '/var/root'},
     'StandardErrorPath': '/var/local/dropbear.log',
