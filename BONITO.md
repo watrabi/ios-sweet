@@ -311,3 +311,11 @@ Metal, in order:
   - Images: /mnt/iosbuild/boot/shim-boot-0088-{metal,nometal}.img.
 - Root disk is full (≤80 MB). Kernel artifacts are downloaded into the scratchpad (RAM), boot images go to /mnt/iosbuild/boot.
 - CI: macOS 14 brownouts have started. The xnu workflow default is now macos-15.
+- **Metal on the phone (2026-11-01):** backboardd gets "Turnip Adreno (TM) 615" and its frames render (lock screen OK, touch OK).
+  - Fix 1: shader cache dirs /var/local/m2v-cache[/proc] must be mode 777 (backboardd isn't root).
+  - Fix 2: the **GPU core clock was XO 19.2 MHz** (gx_gfx3d CFG 0). The GMU never sets it without the HFI perf table, and Turnip's frames tripped the 500 ms hang check.
+    - Kernel sequence (proven first with pokes): Fabia PLL0 at GPUCC+0x0, MODE bits OUTCTRL0 / RESET_N2 / UPDATE_BYPASS23 (not 21 = VOTE_FSM_RESET), CAL_L and L 0x2c, FRAC 0xcaaa (860 MHz), OPMODE run, lock (bit31) is immediate.
+    - Then gfx3d RCG +0x101c: cfg 0x101 = source 1 (crc_div = pll0/2), div 1 → 430 MHz; 0x103 → 215 MHz. Boot-arg sweetgpumhz.
+  - Hang timeout is now 5 s (sweetgpuhang).
+- Still slow. Next levers: DDR/interconnect bandwidth vote (flame 0122, BCM via RPMh), cpufreq + big cores, apps on Metal (mtl2-clients).
+- USB bug: after the cable re-enumerates, the phone's network RX stays dead until reboot.
