@@ -1,0 +1,105 @@
+name: metal
+
+# SweetMetal2.bundle for bonito: Metal on metal2vulkan + Turnip (Mesa's Adreno Vulkan driver, A615 = a6xx gen1),
+# built for iOS 16 arm64. Port of ios-flame's userland (userland/metal2, userland/turnip; MIT) with
+# UniXNU's Mesa patches (darwin kernel backend) and metal2vulkan at UniXNU's pins.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: macOS runner
+        default: macos-15
+      unixnu:
+        description: UniXNU commit whose patches/mesa to apply (ios-flame's era)
+        default: e19e517448432ae2d60676a31caf9c7299884f81
+
+concurrency:
+  group: metal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner || 'macos-15' }}
+    timeout-minutes: 120
+    env:
+      MESA_COMMIT: 85fda3b36405bcaea8bffc64aa4f2651dc90770d
+      M2V_COMMIT: 720ef1ce
+      UNIXNU_COMMIT: ${{ inputs.unixnu || 'e19e517448432ae2d60676a31caf9c7299884f81' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          brew install bison flex llvm glslang ninja || true
+          python3 -m venv work/turnip/venv
+          work/turnip/venv/bin/pip install -q meson mako pyyaml packaging
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          source "$HOME/.cargo/env"
+          rustup toolchain install 1.98.0 --profile minimal --target aarch64-apple-ios
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          mkdir -p work/userland/bin
+          cat > work/userland/bin/ios-cc <<'EOF'
+          #!/bin/sh
+          exec "$(xcrun -f clang)" -arch arm64 -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" -miphoneos-version-min=16.0 "$@"
+          EOF
+          chmod +x work/userland/bin/ios-cc
+          xcodebuild -version
+
+      - name: Sources (Mesa + UniXNU patches, metal2vulkan + bridge patches)
+        run: |
+          set -e
+          git init -q work/turnip/mesa
+          git -C work/turnip/mesa fetch -q --depth 1 https://gitlab.freedesktop.org/mesa/mesa.git "$MESA_COMMIT" ||
+            git -C work/turnip/mesa fetch -q --depth 1 https://chromium.googlesource.com/external/gitlab.freedesktop.org/mesa/mesa "$MESA_COMMIT"
+          git -C work/turnip/mesa checkout -q FETCH_HEAD
+          git init -q work/unixnu
+          git -C work/unixnu fetch -q --depth 1 https://github.com/UniXNU/UniXNU.git "$UNIXNU_COMMIT"
+          git -C work/unixnu checkout -q FETCH_HEAD
+          for p in $(python3 -c "import json;print(' '.join(json.load(open('work/unixnu/scripts/data/adreno-compiler-inputs.json'))['patches']))"); do
+            echo "mesa: $p"
+            git -C work/turnip/mesa apply --whitespace=nowarn "$PWD/work/unixnu/$p"
+          done
+          for p in userland/turnip/patches/*.patch; do
+            echo "mesa: $p"
+            git -C work/turnip/mesa apply --whitespace=nowarn "$PWD/$p"
+          done
+          git clone -q https://github.com/steelbrain/metal2vulkan.git work/metal2vulkan
+          git -C work/metal2vulkan checkout -q "$M2V_COMMIT"
+          for p in userland/metal2/bridge/patches/*.patch; do
+            echo "metal2vulkan: $p"
+            git -C work/metal2vulkan apply --whitespace=nowarn "$PWD/$p"
+          done
+
+      - name: Turnip for iOS
+        run: |
+          export LLVM_AS=$(brew --prefix llvm)/bin/llvm-as
+          tools/build-turnip-ios.sh || { tail -60 work/turnip/build-ios.log 2>/dev/null; tail -40 work/turnip/configure-ios.log 2>/dev/null; exit 1; }
+
+      - name: metal2vulkan bridge for iOS
+        run: |
+          export LLVM_AS=$(brew --prefix llvm)/bin/llvm-as
+          tools/build-m2v-bridge.sh || { tail -80 work/m2v-bridge/build-ios.log; exit 1; }
+
+      - name: SweetMetal2.bundle
+        run: |
+          userland/metal2/build.sh
+          (cd userland/turnip && ./build.sh) || echo "vktest build failed (optional)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sweetmetal2
+          path: |
+            userland/metal2/out/SweetMetal2.bundle
+            userland/metal2/out/m2vtest
+            userland/turnip/out/
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: metal-logs
+          path: |
+            work/turnip/*.log
+            work/m2v-bridge/*.log
+          if-no-files-found: ignore
