@@ -25,7 +25,7 @@ diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
  iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
  iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
-index 0031b2d..dc53a9e 100644
+index 0031b2d..4d1c021 100644
 --- a/bsd/dev/sweet_a6xx.c
 +++ b/bsd/dev/sweet_a6xx.c
 @@ -597,6 +597,45 @@ static int hfi_send(struct a6_gpu *g, uint32_t id, uint32_t *msg, uint32_t dword
@@ -294,7 +294,21 @@ index 0031b2d..dc53a9e 100644
  	/* a6xx hw_init, A615 gen1 (VBIF: no GBIF halt), minus clock gating, CP protection, interrupts */
  	static const uint32_t init[][2] = {
  		{ 0xf803, 0 }, { 0xf800, 0 }, { 0xf801, 0 }, { 0xf802, 0 },	/* SECVID TSB */
-@@ -902,7 +1089,7 @@ static int gpu_cp(struct a6_gpu *g)
+@@ -881,7 +1068,12 @@ static int gpu_cp(struct a6_gpu *g)
+ 		{ 0x0e19, (1u << 7) | 1 },		/* UCHE_CLIENT_PF */
+ 		{ 0x9e00, 0x00018000 },			/* PC_DBG_ECO_CNTL: A615 prim_fifo_threshold */
+ 		{ 0x08d0, 0 },				/* CP_PERFCTR_CP_SEL[0]: always count */
+-		/* A615: UBWC config left at reset values (all our surfaces are linear) */
++		/*
++		 * A615 UBWC, Linux a6xx_set_ubwc_config with sdm670's qcom_ubwc_cfg_data (UBWC 2.0, highest bank
++		 * bit 14): hbb_lo 1, level-2 swizzle on, no AMSBC/min-acc/ubwc_mode, 4-channel macrotile.
++		 * RB/TPL1/SP_NC_MODE_CNTL, UCHE_MODE_CNTL, RBBM_NC_MODE_CNTL. Turnip gets the same via DeviceInfo.
++		 */
++		{ 0x8e08, 1u << 1 }, { 0xb604, 1u << 1 }, { 0xae02, 1u << 1 }, { 0x0e01, 1u << 21 }, { 0x0534, 0 },
+ 	};
+ 	for (unsigned i = 0; i < sizeof(init) / sizeof(init[0]); i++)
+ 		wr32(GREG(init[i][0]), init[i][1]);
+@@ -902,7 +1094,7 @@ static int gpu_cp(struct a6_gpu *g)
  	uint32_t me_init[] = { a6_pkt7(A6_CP_ME_INIT, 8), 0x2f, 3, 0x20000000, 0, 0, 0, 0, 0 };
  	if (a6_ring(g, me_init, 9, "me_init", 1000))
  		return -1;
@@ -1514,7 +1528,7 @@ index a681221..7fc81b4 100644
  		return;
 diff --git a/iokit/Kernel/arm/SweetAccelerator.cpp b/iokit/Kernel/arm/SweetAccelerator.cpp
 new file mode 100644
-index 0000000..b258540
+index 0000000..d56ab02
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetAccelerator.cpp
 @@ -0,0 +1,853 @@
@@ -2146,8 +2160,8 @@ index 0000000..b258540
 +		V2_OUT(NativeAdrenoAbiDeviceInfo);
 +		/*
 +		 * bonito A615 (a6xx gen1): what bsd/dev/sweet_a6xx.c's hw_init programs: GMEM 512 KB at 0x100000
-+		 * (Linux a6xx catalog a615 gmem SZ_512K; UCHE GMEM range 0x100000-0x17ffff). UBWC config is left at
-+		 * reset values there, so SweetMetal2 runs Turnip with TU_DEBUG=noubwc; hbb 14 = Mesa's 615 entry.
++		 * (Linux a6xx catalog a615 gmem SZ_512K; UCHE GMEM range 0x100000-0x17ffff). UBWC as hw_init
++		 * programs it: sdm670 = UBWC 2.0, highest bank bit 14, swizzle levels 2+3, 4-channel macrotile.
 +		 */
 +		rp->chip_id = 0x06010500;
 +		rp->gmem_bytes = 0x80000;
@@ -2158,7 +2172,7 @@ index 0000000..b258540
 +		rp->highest_bank_bit = 14;
 +		rp->ubwc_swizzle = 0x6;
 +		rp->macrotile_mode = 0;
-+		rp->ubwc_version = 3;
++		rp->ubwc_version = 2;
 +		rp->flags = NativeAdrenoDeviceClientIova;
 +		return kIOReturnSuccess;
 +	}

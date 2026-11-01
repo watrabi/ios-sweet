@@ -197,20 +197,7 @@ static bool listed(void)
 				sm2_log("TU_DEBUG=%s, log %s", opts, path);
 			}
 		}
-		/*
-		 * bonito (A615): the kernel leaves the GPU's UBWC registers at reset values (bsd/dev/sweet_a6xx.c),
-		 * so Turnip must not compress images: TU_DEBUG always includes noubwc.
-		 */
-		{
-			const char *cur = getenv("TU_DEBUG");
-			if (!cur || !*cur) {
-				setenv("TU_DEBUG", "noubwc", 1);
-			} else if (!strstr(cur, "noubwc")) {
-				char both[192];
-				snprintf(both, sizeof(both), "%s,noubwc", cur);
-				setenv("TU_DEBUG", both, 1);
-			}
-		}
+		/* bonito (A615): UBWC 2.0 is configured by the kernel (0088); /var/local/mtl2-tu-debug "noubwc" turns it off */
 		uint64_t registryID = 0;
 		IORegistryEntryGetRegistryEntryID(port, &registryID);
 		double t0 = CFAbsoluteTimeGetCurrent();
