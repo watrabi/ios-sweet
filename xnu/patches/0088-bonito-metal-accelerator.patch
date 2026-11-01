@@ -25,13 +25,60 @@ diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
  iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
  iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
-index 0031b2d..3953f41 100644
+index 0031b2d..dc53a9e 100644
 --- a/bsd/dev/sweet_a6xx.c
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -641,6 +641,14 @@ static int gmu_hfi(struct a6_gpu *g)
+@@ -597,6 +597,45 @@ static int hfi_send(struct a6_gpu *g, uint32_t id, uint32_t *msg, uint32_t dword
+ #define GMU_SPTPRAC_STATUS	0x1f8d0
+ #define GMU_HFI_CTRL_INIT	0x1f986
+ 
++/*
++ * A615 core clock. Without the HFI perf table the GMU never moves gpu_cc_gx_gfx3d_clk_src off XO
++ * (19.2 MHz: Turnip's first frames made no progress for 500 ms). Set it from the CPU like downstream
++ * gpucc-sdm845.c (gfxcc): gpu_cc_pll0 (Fabia, GPUCC+0x0) at 860 MHz, gfx3d RCG (+0x101c) source 1 =
++ * crc_div (pll0 even / 2), divider a6_gx_div (1 -> 430 MHz = sdm670 OPP at SVS_L1, the level voted in
++ * BOOT_SLUMBER; 2 -> 215 MHz). Proven live with pokes on 2026-11-01 (PLL locks at once).
++ */
++unsigned a6_gx_div = 1;
++
++static void gx_clock(void)
++{
++	uint64_t pll = GPUCC + 0x0, rcg = GPUCC + 0x101c;
++	if (!a6_gx_div) {
++		return;
++	}
++	wr32(pll, rd32(pll) & ~1u);			/* OUTCTRL off */
++	wr32(pll, rd32(pll) & ~(1u << 21));		/* VOTE_FSM_RESET off */
++	wr32(pll + 0x2c, 0);				/* OPMODE standby */
++	wr32(pll, rd32(pll) & ~4u);			/* RESET_N low */
++	wr32(pll + 0x08, 0x2c);				/* CAL_L */
++	wr32(pll + 0x04, 0x2c);				/* L: 44.79 x 19.2 MHz = 860 MHz */
++	wr32(pll + 0x38, 0xcaaa);			/* FRAC */
++	wr32(pll, rd32(pll) | (1u << 23));		/* UPDATE_BYPASS */
++	wr32(pll, rd32(pll) | 4u);			/* RESET_N */
++	wr32(pll + 0x2c, 1);				/* OPMODE run */
++	int lock = wait_bit(pll, 1u << 31, 1, 100);
++	if (lock) {
++		a6_log("gx clock: pll0 did not lock (mode %x); GPU stays on XO\n", rd32(pll));
++		return;
++	}
++	wr32(pll + 0x0c, rd32(pll + 0x0c) | 7u);	/* USER_CTL: main/even/odd outputs */
++	wr32(pll, rd32(pll) | 1u);			/* OUTCTRL */
++	wr32(rcg + 4, (1u << 8) | (2u * a6_gx_div - 1u));
++	wr32(rcg, rd32(rcg) | 1u);			/* UPDATE */
++	int upd = wait_bit(rcg, 1u, 0, 10);
++	a6_log("gx clock: pll0 860 MHz locked, gfx3d %u MHz (cfg %x cmd %x)%s\n", 430 / a6_gx_div,
++	    rd32(rcg + 4), rd32(rcg), upd ? " UPDATE TIMEOUT" : "");
++}
++
+ static int legacy_oob(unsigned req, unsigned ack)
+ {
+ 	wr32(GMU_REG(GMU_H2G_SET), 1u << req);
+@@ -641,6 +680,15 @@ static int gmu_hfi(struct a6_gpu *g)
  		a6_log("GX not powered; not touching GPU registers\n");
  		return -1;
  	}
++	gx_clock();
 +	/*
 +	 * A615: the GPU core clock (downstream gpucc-sdm845.c gfxcc: gpu_cc_pll0 fabia at +0x0, gx_gfx3d RCG at
 +	 * +0x101c, branch +0x1054). Without the HFI perf table the GMU may never move it off XO (19.2 MHz).
@@ -43,7 +90,7 @@ index 0031b2d..3953f41 100644
  	return 0;
  }
  
-@@ -715,14 +723,15 @@ int a6_ring(struct a6_gpu *g, const uint32_t *dw, uint32_t n, const char *what,
+@@ -715,14 +763,15 @@ int a6_ring(struct a6_gpu *g, const uint32_t *dw, uint32_t n, const char *what,
  		a6_write(a6_pool_pa(g, A6_OFF_RING), dw + first, 4ull * (n - first));
  	g->wptr = (w + n) % A6_RING_DW;
  	wr32(GREG(CP_RB_WPTR), g->wptr);
@@ -63,7 +110,7 @@ index 0031b2d..3953f41 100644
  	if (what || !ok)
  		a6_log("ring %s: rptr %x wptr %x status %x int %x hwfault %x cp_status1 %x %s\n",
  		       what ? what : "", rd32(GREG(CP_RB_RPTR)), g->wptr, rd32(GREG(RBBM_STATUS)),
-@@ -738,6 +747,89 @@ uint32_t a6_fence_read(const struct a6_gpu *g)
+@@ -738,6 +787,89 @@ uint32_t a6_fence_read(const struct a6_gpu *g)
  	return v;
  }
  
@@ -153,7 +200,7 @@ index 0031b2d..3953f41 100644
  int a6_submit_ib(struct a6_gpu *g, uint64_t iova, uint32_t dwords, unsigned timeout_ms)
  {
  	uint64_t fva = a6_pool_va(A6_OFF_SCRATCH);
-@@ -768,12 +860,14 @@ static void map_gpu_low(struct a6_gpu *g)
+@@ -768,12 +900,14 @@ static void map_gpu_low(struct a6_gpu *g)
  
  static uint64_t pt_alloc(struct a6_gpu *g)
  {
@@ -172,7 +219,7 @@ index 0031b2d..3953f41 100644
  }
  
  static uint64_t pt_walk(struct a6_gpu *g, uint64_t table, unsigned idx)
-@@ -839,6 +933,29 @@ int a6_map_pages(struct a6_gpu *g, uint64_t iova, const uint64_t *pages, uint32_
+@@ -839,6 +973,29 @@ int a6_map_pages(struct a6_gpu *g, uint64_t iova, const uint64_t *pages, uint32_
  	return map_4k(g, iova, npages << l.shift, list_pa, &l);
  }
  
@@ -202,7 +249,7 @@ index 0031b2d..3953f41 100644
  void a6_unmap_high(struct a6_gpu *g)
  {
  	static const uint64_t zeros[511];
-@@ -853,6 +970,17 @@ void a6_unmap_high(struct a6_gpu *g)
+@@ -853,6 +1010,17 @@ void a6_unmap_high(struct a6_gpu *g)
  
  /* ---- stage 4: GPU SMMU bank, hw_init, SQE, CP ---- */
  
@@ -220,7 +267,7 @@ index 0031b2d..3953f41 100644
  static int gpu_cp(struct a6_gpu *g)
  {
  	if (smmu_pick(&g->gpu_smr, &g->gpu_cb, g->gmu_cb + 1)) {
-@@ -861,7 +989,26 @@ static int gpu_cp(struct a6_gpu *g)
+@@ -861,7 +1029,26 @@ static int gpu_cp(struct a6_gpu *g)
  	}
  	map_gpu_low(g);
  	smmu_bank(g->gpu_smr, g->gpu_cb, a6_pool_pa(g, A6_OFF_GT_L1), GPU_SID, GPU_SID_MASK);
@@ -247,7 +294,7 @@ index 0031b2d..3953f41 100644
  	/* a6xx hw_init, A615 gen1 (VBIF: no GBIF halt), minus clock gating, CP protection, interrupts */
  	static const uint32_t init[][2] = {
  		{ 0xf803, 0 }, { 0xf800, 0 }, { 0xf801, 0 }, { 0xf802, 0 },	/* SECVID TSB */
-@@ -902,7 +1049,7 @@ static int gpu_cp(struct a6_gpu *g)
+@@ -902,7 +1089,7 @@ static int gpu_cp(struct a6_gpu *g)
  	uint32_t me_init[] = { a6_pkt7(A6_CP_ME_INIT, 8), 0x2f, 3, 0x20000000, 0, 0, 0, 0, 0 };
  	if (a6_ring(g, me_init, 9, "me_init", 1000))
  		return -1;
@@ -257,10 +304,10 @@ index 0031b2d..3953f41 100644
  	uint32_t secure[] = { a6_pkt7(A6_CP_SET_SECURE_MODE, 1), 0 };
  	return a6_ring(g, secure, 2, "secure mode off", 1000);
 diff --git a/bsd/dev/sweet_a6xx.h b/bsd/dev/sweet_a6xx.h
-index 3bb9f03..3814048 100644
+index 3bb9f03..b75e34b 100644
 --- a/bsd/dev/sweet_a6xx.h
 +++ b/bsd/dev/sweet_a6xx.h
-@@ -69,9 +69,11 @@ void a6_wr(uint64_t pa, uint32_t v);
+@@ -69,16 +69,20 @@ void a6_wr(uint64_t pa, uint32_t v);
  int a6_write(uint64_t pa, const void *buf, size_t len);	/* DRAM: any size; MMIO: words */
  int a6_read(uint64_t pa, void *buf, size_t len);
  void a6_delay_ms(unsigned ms);
@@ -272,15 +319,17 @@ index 3bb9f03..3814048 100644
  
  /* ---- core ---- */
  static inline uint64_t a6_pool_pa(const struct a6_gpu *g, uint64_t off) { return g->pool_pa + off; }
-@@ -79,6 +81,7 @@ static inline uint64_t a6_pool_va(uint64_t off) { return A6_GVA_POOL + off; }
+ static inline uint64_t a6_pool_va(uint64_t off) { return A6_GVA_POOL + off; }
  
  void a6_init_state(struct a6_gpu *g, uint64_t pool_pa);
- int a6_power_up(struct a6_gpu *g);	/* everything up to a working CP with the zap shader; 0 = ok */
+-int a6_power_up(struct a6_gpu *g);	/* everything up to a working CP with the zap shader; 0 = ok */
++int a6_power_up(struct a6_gpu *g);
++extern unsigned a6_gx_div;	/* A615 core clock: 430 MHz / a6_gx_div (0 = leave on XO) */	/* everything up to a working CP with the zap shader; 0 = ok */
 +int a6_recover(struct a6_gpu *g);	/* after a hang/fault: soft reset, CP re-init (mappings kept); 0 = ok */
  bool a6_cx_up(void);
  bool a6_gx_up(void);
  bool a6_cp_running(const struct a6_gpu *g);	/* GX on and the CP runs our SQE */
-@@ -90,11 +93,32 @@ uint32_t a6_pkt4(uint32_t reg, uint32_t cnt);
+@@ -90,11 +94,32 @@ uint32_t a6_pkt4(uint32_t reg, uint32_t cnt);
  int a6_ring(struct a6_gpu *g, const uint32_t *dw, uint32_t n, const char *what, unsigned timeout_ms);
  /* IB at iova, then WFI + fence write; waits for the fence. 0 = ok. */
  int a6_submit_ib(struct a6_gpu *g, uint64_t iova, uint32_t dwords, unsigned timeout_ms);
@@ -329,7 +378,7 @@ index ab6da99..522e301 100644
  	while (off < size) {
  		size_t chunk = (size_t)MIN((uint64_t)SF_BUF, size - off);
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
-index c61ce00..5e69f64 100644
+index c61ce00..064b6c7 100644
 --- a/bsd/dev/sweet_gpu.c
 +++ b/bsd/dev/sweet_gpu.c
 @@ -46,9 +46,11 @@ void sweet_gpu_init(void);
@@ -442,15 +491,18 @@ index c61ce00..5e69f64 100644
  void
  a6_log(const char *fmt, ...)
  {
-@@ -296,6 +342,7 @@ sweet_gpu_init(void)
+@@ -296,6 +342,10 @@ sweet_gpu_init(void)
  		return;
  	}
  	PE_parse_boot_argn("sweetgpudbg", &gpu_dbg, sizeof(gpu_dbg));
 +	PE_parse_boot_argn("sweetgpuhang", &gpu_hang_ms, sizeof(gpu_hang_ms));
++	uint32_t mhz = 430;
++	PE_parse_boot_argn("sweetgpumhz", &mhz, sizeof(mhz));
++	a6_gx_div = mhz == 0 ? 0 : mhz <= 215 ? 2 : 1;
  	vm_offset_t va = 0;
  	if (kmem_alloc_contig(kernel_map, &va, A6_POOL_SIZE, PAGE_MASK, 0, (ppnum_t)(atop_64(A6_POOL_ALIGN) - 1),
  	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
-@@ -305,7 +352,15 @@ sweet_gpu_init(void)
+@@ -305,7 +355,15 @@ sweet_gpu_init(void)
  	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)va);
  	a6_init_state(&gpu, ptoa_64(pn));
  	pool_kva = va;
@@ -467,7 +519,7 @@ index c61ce00..5e69f64 100644
  	thread_t thread;
  	if (kernel_thread_start(gpu_thread, NULL, &thread) == KERN_SUCCESS) {
  		thread_deallocate(thread);
-@@ -318,6 +373,107 @@ sweet_gpu_ready(void)
+@@ -318,6 +376,107 @@ sweet_gpu_ready(void)
  	return gpu_ready;
  }
  
@@ -575,7 +627,7 @@ index c61ce00..5e69f64 100644
  /* ---- the panel ---- */
  
  /*
-@@ -422,18 +578,19 @@ static uint64_t stat_frames, stat_clean_abs, stat_gpu_abs;
+@@ -422,18 +581,19 @@ static uint64_t stat_frames, stat_clean_abs, stat_gpu_abs;
  /*
   * Blit a mapped surface, scaled to fit and centred, into the panel memory
   * (rows of fb_pitch bytes). The CPU rendered it through the cache: clean
@@ -599,7 +651,7 @@ index c61ce00..5e69f64 100644
  	}
  	uint64_t t1 = mach_absolute_time();
  
-@@ -455,14 +612,20 @@ sweet_gpu_present(int s, uint32_t offset, uint32_t w, uint32_t h, uint32_t pitch
+@@ -455,14 +615,20 @@ sweet_gpu_present(int s, uint32_t offset, uint32_t w, uint32_t h, uint32_t pitch
  	lck_mtx_lock(&sweet_gpu_lock);
  	uint32_t n = a6_blit_ib(&gpu, &b, dw);
  	a6_write(a6_pool_pa(&gpu, IB_OFF), dw, 4ULL * n);
@@ -628,7 +680,7 @@ index c61ce00..5e69f64 100644
  	}
  	lck_mtx_unlock(&sweet_gpu_lock);
  	uint64_t t2 = mach_absolute_time();
-@@ -480,4 +643,446 @@ sweet_gpu_present(int s, uint32_t offset, uint32_t w, uint32_t h, uint32_t pitch
+@@ -480,4 +646,446 @@ sweet_gpu_present(int s, uint32_t offset, uint32_t w, uint32_t h, uint32_t pitch
  	*out_dw = b.dw;
  	return rc;
  }
