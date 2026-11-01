@@ -26,6 +26,7 @@ ${CROSS}objcopy -O binary -j .text $O/init.o $O/init.text
 python3 tools/mkinit.py --raw $O/init.text 0 $O/sweet-init
 
 if [ "$MEM" = wide ]; then flag=--bonito-wide; else flag=--bonito; fi
+# USB=1: report USB state; USB=2: USB Ethernet 192.168.7.2 + file server tcp 2223 (0087)
 # GPU=1: Adreno 615 firmware into /chosen + boot-arg sweetgpu=1 (patch 0086)
 if [ "${GPU:-0}" = 1 ]; then flag="$flag --gpufw research/gpu/fw"; fi
 python3 tools/mkadt.py $O/bonito-$MEM.adt $flag 2>/dev/null
@@ -41,7 +42,7 @@ if [ "${KEYS:-0}" = 1 ]; then KEYSARG=""; else KEYSARG="sweetkeys=0 "; fi
 if [ "${GPU:-0}" = 1 ]; then GPUARG="sweetgpu=1 "; else GPUARG=""; fi
 # GPUDBG=<s>: GPU bring-up that long after boot, TZ calls logged + paced, log flushed every second
 if [ -n "${GPUDBG:-}" ]; then GPUARG="${GPUARG}sweetgpudbg=$GPUDBG ufslogsecs=1 "; fi
-ARGS="$ARGS ${TOUCHARG}${KEYSARG}${GPUARG}sweetusb=0 wdt=-1 wdt_test=no_user_checkin $EXTRA"
+ARGS="$ARGS ${TOUCHARG}${KEYSARG}${GPUARG}sweetusb=${USB:-0} wdt=-1 wdt_test=no_user_checkin $EXTRA"
 python3 tools/mkpayload.py "$K" $O/bonito-$MEM.adt $O/payload-xnu.bin "${RDARG[@]}" --cmdline "$ARGS"
 (cd shim && ./build.sh ../$O/payload-xnu.bin >/dev/null)
 mv $O/shim-boot.img $O/shim-boot-xnu.img
