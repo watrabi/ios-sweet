@@ -157,6 +157,7 @@ static void branch_on(const char *name, uintptr_t reg)
 
 extern const uint8_t gmu_fw[], gmu_fw_end[];
 static void gmu_power_up(void);
+static void gpu_run(void);
 static void crumb(const char *what);
 
 /* PC-relative address of an embedded symbol: keeps the compiler from folding
@@ -454,9 +455,9 @@ static void gmu_boot(void)
 
 /* sdm670.dtsi GPU OPPs every speed bin has (opp-supported-hw 0xf), "off" first. */
 #define NGPU 4
-static const uint32_t gpu_khz[NGPU] = { 0, 267000, 355000, 430000 };
+static const uint32_t __attribute__((unused)) gpu_khz[NGPU] = { 0, 267000, 355000, 430000 };
 static const uint32_t gpu_lvl[NGPU] = { 0, 64 /* LOW_SVS */, 128 /* SVS */, 192 /* SVS_L1 */ };
-static const uint32_t gmu_khz[2] = { 0, 200000 };
+static const uint32_t __attribute__((unused)) gmu_khz[2] = { 0, 200000 };
 static const uint32_t gmu_lvl[2] = { 0, 48 /* MIN_SVS */ };
 
 static uint32_t hfi_seq;
@@ -560,7 +561,7 @@ static int arc_votes(uint32_t *votes, const uint32_t *lvl, int n, const char *pr
 	return 0;
 }
 
-static int hfi_send(uint32_t id, uint32_t *msg, uint32_t dwords)
+static int __attribute__((unused)) hfi_send(uint32_t id, uint32_t *msg, uint32_t dwords)
 {
 	uint32_t seq = ++hfi_seq;
 	msg[0] = (seq << 20) | (dwords << 8) | id;
@@ -663,84 +664,9 @@ static void gmu_power_up(void)
 	if (rc)
 		return;
 
-	/* a6xx_hfi_start_v1 */
-	step("HFI v1: init, version, perf, bw, test");
-	for (int i = 0; i < 192; i++)
-		msg[i] = 0;
-	msg[1] = 0;			/* seg_id */
-	msg[2] = VA_DEBUG;
-	msg[3] = 0x4000;
-	msg[4] = 1;			/* GMU_COLD_BOOT */
-	crumb("HFI msg 0 init");
-	int r_init = hfi_send(0, msg, 5);
-	con_hex2(" init", "rc=", (uint32_t)r_init, "fault=", rd32(GMU_REG(GMU_G2H_INFO)) & G2H_CM3_FAULT);
-	if (gmu_cb >= 0) {
-		uintptr_t cbr = SMMU_CB(gmu_cb);
-		con_hex2(" cb", "fsr=", rd32(cbr + CB_FSR), "far=", rd32(cbr + CB_FAR));
-		con_hex2(" cb", "fsynr0=", rd32(cbr + CB_FSYNR0), "gfsr=", rd32(SMMU + 0x48));
-	}
-	mdelay(200);	/* let the firmware finish writing whatever it reports */
-	con_hex2(" f2h err", "hdr=", hfi_err[0], "w1=", hfi_err[1]);
-	con_hex2(" f2h err", "w2=", hfi_err[2], "w3=", hfi_err[3]);
-	con_hex2(" gmu", "init_res=", rd32(GMU_REG(GMU_INIT_RESULT)), "rpmh=", rd32(GMU_REG(GMU_RPMH_STATE)));
-	con_hex2(" rsc", "status0=", rd32(RSCC_REG(0x0004)), "seqbusy=", rd32(RSCC_REG(0x0101)));
-	con_hex2(" pdc", "enable=", rd32(PDC_REG(0x1140)), "cx_busy=", rd32(GMU_REG(GMU_CX_BUSY)));
-	con_hex2(" log", "[0]=", rd32(GMEM_LOG), "[1]=", rd32(GMEM_LOG + 4));
-	con_hex2(" log", "[2]=", rd32(GMEM_LOG + 8), "[3]=", rd32(GMEM_LOG + 12));
-	con_hex2(" dbg", "[0]=", rd32(GMEM_DEBUG), "[1]=", rd32(GMEM_DEBUG + 4));
-	con_hex2(" dbg", "[2]=", rd32(GMEM_DEBUG + 8), "[3]=", rd32(GMEM_DEBUG + 12));
-	con_hex2(" dcache", "[0]=", rd32(GMEM_DCACHE), "[1]=", rd32(GMEM_DCACHE + 4));
-	msg[1] = 1;			/* supported_version */
-	crumb("HFI msg 1 version");
-	int r_ver = hfi_send(1, msg, 2);
-	con_hex2(" ver", "rc=", (uint32_t)r_ver, 0, 0);
-	for (int i = 0; i < 192; i++)
-		msg[i] = 0;
-	msg[1] = NGPU;
-	msg[2] = 2;
-	for (int i = 0; i < NGPU; i++) {
-		msg[3 + 2 * i] = gx[i];
-		msg[4 + 2 * i] = gpu_khz[i];
-	}
-	for (int i = 0; i < 2; i++) {
-		msg[3 + 32 + 2 * i] = cx[i];
-		msg[4 + 32 + 2 * i] = gmu_khz[i];
-	}
-	crumb("HFI msg 4 perf table");
-	int r_perf = hfi_send(4, msg, 3 + 32 + 8);
-	con_hex2(" perf", "rc=", (uint32_t)r_perf, 0, 0);
-	for (int i = 0; i < 192; i++)
-		msg[i] = 0;
-	/* a6xx_build_bw_table (default A6xx gen1, A615 uses it) */
-	msg[1] = 1;			/* bw_level_num */
-	msg[2] = 3;			/* cnoc_cmds_num */
-	msg[3] = 3;			/* ddr_cmds_num */
-	msg[4] = 0x05;			/* cnoc_wait_bitmask */
-	msg[5] = 0x07;			/* ddr_wait_bitmask */
-	msg[6] = 0x50034;		/* cnoc addrs [6] */
-	msg[7] = 0x5007c;
-	msg[8] = 0x5004c;
-	msg[12] = 0x40000000;		/* cnoc data [2][6] */
-	msg[13] = 0x00000000;
-	msg[14] = 0x40000000;
-	msg[18] = 0x60000001;
-	msg[19] = 0x20000001;
-	msg[20] = 0x60000001;
-	msg[24] = 0x50000;		/* ddr addrs [8] */
-	msg[25] = 0x5005c;
-	msg[26] = 0x5000c;
-	msg[32] = 0x40000000;		/* ddr data [16][8] */
-	msg[33] = 0x40000000;
-	msg[34] = 0x40000000;
-	crumb("HFI msg 3 bw table");
-	int r_bw = hfi_send(3, msg, 32 + 128);
-	con_hex2(" bw", "rc=", (uint32_t)r_bw, 0, 0);
-	crumb("HFI msg 5 test");
-	int r_test = hfi_send(5, msg, 1);
-	con_hex2("HFI", "init=", (uint32_t)r_init, "ver=", (uint32_t)r_ver);
-	con_hex2(" hfi", "perf=", (uint32_t)r_perf, "bw=", (uint32_t)r_bw);
-	con_hex2(" hfi", "test=", (uint32_t)r_test, "ctrl=", rd32(GMU_REG(GMU_HFI_CTRL)));
-	con_hex2(" g2h", "info=", rd32(GMU_REG(GMU_G2H_INFO)), "fault=", rd32(GMU_REG(GMU_G2H_INFO)) & G2H_CM3_FAULT);
+	/* HFI v1 messages skipped: the INIT message makes this firmware fault (see BONITO.md);
+	 * GX is already powered by the boot-slumber OOB. */
+	(void)msg;
 
 	/* OOB GPU_SET (legacy 16 -> 24): the GMU powers the GX side */
 	step("OOB GPU_SET");
@@ -755,6 +681,261 @@ static void gmu_power_up(void)
 	con_hex2("RBBM", "status=", rd32(GPU + 4 * 0x210), "chipid=", rd32(GPU + 4 * 0x885));
 	wr32(GPU + 4 * 0x883, 0x41445245);
 	con_hex2("SCRATCH0", "now=", rd32(GPU + 4 * 0x883), "want=", 0x41445245);
+	con_str("NEXT", "stage 4-5 on a new page in 15 s (photo this one)");
+	mdelay(15000);
+	con_clear(RED);
+	gpu_run();
+}
+
+/* ---- stage 4-5: zap shader (TZ PAS), SQE, ringbuffer, first commands ---- */
+/* Port of ios-flame's zap_load/gpu_run with the A615 (gen1, VBIF) hw_init. */
+
+#define GREG(o)		(GPU + 4UL * (o))
+#define PAS_GPU		13
+#define ZAP_REGION	0x97a15000UL	/* live FDT gpu_region (bonito), 8K */
+#define ZAP_SIZE	0x2000UL
+#define ZAP_META	(GMEM + 0xa0000)
+#define GT_L1		(GMEM + 0x200000)
+#define GT_L2		(GMEM + 0x201000)
+#define GT_L3		(GMEM + 0x202000)	/* VA 0x10000000-0x101fffff */
+#define G_SQE		(GMEM + 0x300000)
+#define G_RING		(GMEM + 0x310000)
+#define G_TARGET	(GMEM + 0x320000)
+#define GVA_SQE		0x10000000u
+#define GVA_RING	0x10010000u
+#define GVA_TARGET	0x10020000u
+#define RING_DW		(0x8000 / 4)
+#define GPU_SID		0		/* sdm670.dtsi gpu iommus = <&adreno_smmu 0>; no mask (3-bit ids) */
+
+extern const uint8_t sqe_fw[], sqe_fw_end[], zap_mdt[], zap_mdt_end[], zap_b02[], zap_b02_end[];
+static uint32_t wptr;
+
+/* SMC64 SIP call, svc PIL (qcom_scm): returns x0, x1 in *r1 */
+static int64_t scm(uint32_t cmd, uint64_t arginfo, uint64_t a, uint64_t b, uint64_t *r1)
+{
+	register uint64_t x0 __asm__("x0") = 0x42000000UL | (2u << 8) | cmd;
+	register uint64_t x1 __asm__("x1") = arginfo;
+	register uint64_t x2 __asm__("x2") = a;
+	register uint64_t x3 __asm__("x3") = b;
+	register uint64_t x4 __asm__("x4") = 0;
+	register uint64_t x5 __asm__("x5") = 0;
+	__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5) :
+			 : "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+	if (r1)
+		*r1 = x1;
+	return (int64_t)x0;
+}
+
+static void copy_in(uintptr_t dst, const uint8_t *src, uint32_t len)
+{
+	for (uint32_t o = 0; o < len; o += 4) {
+		uint32_t w = 0;
+		for (uint32_t i = 0; i < 4 && o + i < len; i++)
+			w |= (uint32_t)src[o + i] << (8 * i);
+		wr32(dst + o, w);
+	}
+}
+
+static uint32_t pm4_parity(uint32_t v)
+{
+	return (0x9669 >> (0xf & (v ^ (v >> 4) ^ (v >> 8) ^ (v >> 12) ^ (v >> 16) ^
+				   (v >> 20) ^ (v >> 24) ^ (v >> 28)))) & 1;
+}
+
+static void ring(uint32_t v)
+{
+	wr32(G_RING + 4 * wptr, v);
+	wptr = (wptr + 1) % RING_DW;
+}
+
+static void pkt7(uint32_t op, uint32_t cnt)
+{
+	ring(0x70000000 | cnt | (pm4_parity(cnt) << 15) | ((op & 0x7f) << 16) | (pm4_parity(op) << 23));
+}
+
+static int flush_wait(const char *what)
+{
+	wr32(GREG(0x807), wptr);			/* CP_RB_WPTR */
+	int i;
+	for (i = 0; i < 1000; i++) {
+		if (rd32(GREG(0x806)) == wptr && !(rd32(GREG(0x210)) & (1u << 23)))
+			break;
+		mdelay(1);
+	}
+	con_hex2(i < 1000 ? " idle" : " TIMEOUT", "rptr=", rd32(GREG(0x806)), "wptr=", wptr);
+	con_hex2(" ", "status=", rd32(GREG(0x210)), "hwfault=", rd32(GREG(0x821)));
+	(void)what;
+	return i < 1000 ? 0 : -1;
+}
+
+static int zap_load(void)
+{
+	uint64_t r1 = 0;
+	int64_t rc = scm(7, 1, PAS_GPU, 0, &r1);		/* PAS_IS_SUPPORTED */
+	con_hex2("ZAP", "supported rc=", (uint32_t)rc, "r1=", (uint32_t)r1);
+	const uint8_t *mdt = PCREL(zap_mdt), *mdt_end = PCREL(zap_mdt_end);
+	const uint8_t *seg = PCREL(zap_b02), *seg_end = PCREL(zap_b02_end);
+	uint32_t mlen = (uint32_t)(mdt_end - mdt), slen = (uint32_t)(seg_end - seg);
+	copy_in(ZAP_META, mdt, mlen);
+	crumb("zap init image");
+	rc = scm(1, 2 | (2u << 6), PAS_GPU, ZAP_META, &r1);	/* INIT_IMAGE(id, metadata PA) */
+	con_hex2(" init", "rc=", (uint32_t)rc, "r1=", (uint32_t)r1);
+	if (rc || r1)
+		return -1;
+	crumb("zap mem setup");
+	{	/* MEM_SETUP(id, base, size): QCOM_SCM_ARGS(3) -> x2, x3, x4 */
+		register uint64_t x0 __asm__("x0") = 0x42000000UL | (2u << 8) | 2;
+		register uint64_t x1 __asm__("x1") = 3;
+		register uint64_t x2 __asm__("x2") = PAS_GPU;
+		register uint64_t x3 __asm__("x3") = ZAP_REGION;
+		register uint64_t x4 __asm__("x4") = ZAP_SIZE;
+		__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4) :
+				 : "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+		rc = (int64_t)x0;
+		r1 = x1;
+	}
+	con_hex2(" memsetup", "rc=", (uint32_t)rc, "r1=", (uint32_t)r1);
+	if (rc || r1)
+		return -1;
+	for (uint32_t o = 0; o < ZAP_SIZE; o += 4)
+		wr32(ZAP_REGION + o, 0);
+	copy_in(ZAP_REGION, seg, slen);			/* the one LOAD segment, at the base */
+	crumb("zap auth and reset");
+	rc = scm(5, 1, PAS_GPU, 0, &r1);			/* AUTH_AND_RESET */
+	con_hex2(" auth", "rc=", (uint32_t)rc, "r1=", (uint32_t)r1);
+	return (rc || r1) ? -1 : 0;
+}
+
+static void gpu_run(void)
+{
+	int cb = gmu_cb + 1, smr = -1;
+	uint32_t nsmr = rd32(SMMU + 0x20) & 0xff;
+	con_line("GPU stage 4-5  SMMU, hw_init, SQE, ring, zap, CP_MEM_WRITE", GREEN);
+	for (uint32_t i = 0; i < nsmr; i++)
+		if (!(rd32(SMR(i)) >> 31)) {
+			smr = (int)i;
+			break;
+		}
+	if (smr < 0 || cb >= (int)(rd32(SMMU + 0x24) & 0xff)) {
+		con_str("SMMU", "no SMR/CB left for the GPU stream");
+		return;
+	}
+	step("GPU stream: page tables, context bank");
+	zero32(GT_L1, 0x3000);
+	zero32(G_SQE, 0x21000);
+	wr64(GT_L1 + 0, GT_L2 | 3);
+	wr64(GT_L2 + 8 * ((GVA_SQE >> 21) & 0x1ff), GT_L3 | 3);
+	map_pages(GT_L3, GVA_SQE, G_SQE, 0x10000);
+	map_pages(GT_L3, GVA_RING, G_RING, 0x8000);
+	map_pages(GT_L3, GVA_TARGET, G_TARGET, 0x1000);
+	wr32(G_TARGET, 0x11111111);
+	uintptr_t c = SMMU_CB(cb);
+	wr32(c + CB_SCTLR, 0);
+	wr32(CBA2R(cb), 1);
+	wr32(CBAR(cb), (1u << 16) | (0xfu << 12) | (3u << 8) | ((uint32_t)cb + 1));
+	wr32(c + CB_TCR2, 2);
+	wr64(c + CB_TTBR0, GT_L1);
+	wr32(c + CB_TCR, 32 | (1u << 8) | (1u << 10) | (3u << 12) | (1u << 23));
+	wr32(c + CB_MAIR0, 0x0000ff44);
+	wr32(c + CB_FSR, 0xffffffff);
+	wr32(c + CB_SCTLR, 1 | 2 | 4 | 0x20 | 0x40);
+	wr32(SMMU + 0x68, 0);
+	wr32(SMMU + 0x70, 0);
+	wait_bit(SMMU + 0x74, 1, 0, 10);
+	wr32(S2CR(smr), (uint32_t)cb);
+	wr32(SMR(smr), (1u << 31) | GPU_SID);
+	con_hex2(" smr", "idx=", (uint32_t)smr, "read=", rd32(SMR(smr)));
+	if (rd32(SMR(smr)) != ((1u << 31) | GPU_SID)) {
+		con_str("STOP", "GPU stream SMR did not stick");
+		return;
+	}
+
+	step("hw_init (A615 gen1, VBIF)");
+	wr32(GREG(0xf803), 0);				/* RBBM_SECVID_TSB_CNTL */
+	wr32(GREG(0xf800), 0);
+	wr32(GREG(0xf801), 0);
+	wr32(GREG(0xf802), 0);
+	static const uint16_t addr_mode[] = { 0x0842, 0x0c01, 0x8601, 0x8e05, 0x9e01, 0xbe05,
+					      0xa601, 0x9601, 0x0e00, 0xae01, 0xb601, 0xf810 };
+	for (unsigned i = 0; i < sizeof(addr_mode) / sizeof(addr_mode[0]); i++)
+		wr32(GREG(addr_mode[i]), 1);
+	wr32(GREG(0x10), 3);				/* RBBM_VBIF_CLIENT_QOS_CNTL */
+	wr32(GREG(0x50b), 0xffffffff);			/* RBBM_PERFCTR_GPU_BUSY_MASKED */
+	uint64_t trap = 0x1fffffffff000ull;
+	wr32(GREG(0xe05), (uint32_t)(trap + 0xfc0));	/* UCHE_WRITE_RANGE_MAX */
+	wr32(GREG(0xe06), (uint32_t)((trap + 0xfc0) >> 32));
+	wr32(GREG(0xe09), (uint32_t)trap);		/* UCHE_TRAP_BASE */
+	wr32(GREG(0xe0a), (uint32_t)(trap >> 32));
+	wr32(GREG(0xe07), (uint32_t)trap);		/* UCHE_WRITE_THRU_BASE */
+	wr32(GREG(0xe08), (uint32_t)(trap >> 32));
+	wr32(GREG(0xe0b), 0x100000);			/* UCHE_GMEM_RANGE: 1M .. 1M + 512K - 1 */
+	wr32(GREG(0xe0c), 0);
+	wr32(GREG(0xe0d), 0x100000 + 0x80000 - 1);
+	wr32(GREG(0xe0e), 0);
+	wr32(GREG(0xe18), 0x804);			/* UCHE_FILTER_CNTL */
+	wr32(GREG(0xe17), 0x4);				/* UCHE_CACHE_WAYS */
+	wr32(GREG(0x8c2), 0x010000c0);			/* CP_ROQ_THRESHOLDS_2 (gen1) */
+	wr32(GREG(0x8c1), 0x8040362c);			/* CP_ROQ_THRESHOLDS_1 */
+	wr32(GREG(0x8c3), 128);				/* CP_MEM_POOL_SIZE */
+	wr32(GREG(0x9e00), 0x0018000);			/* PC_DBG_ECO_CNTL: A615 prim_fifo_threshold */
+	wr32(GREG(0x98d), 1);				/* CP_AHB_CNTL */
+	wr32(GREG(0x500), 1);				/* RBBM_PERFCTR_CNTL */
+	wr32(GREG(0x1f), (1u << 30) | 0x1fffff);	/* RBBM_INTERFACE_HANG_INT_CNTL */
+	wr32(GREG(0xe19), (1u << 7) | 1);		/* UCHE_CLIENT_PF */
+
+	step("SQE microcode + ring, CP start");
+	const uint8_t *sqe = PCREL(sqe_fw), *sqe_end = PCREL(sqe_fw_end);
+	uint32_t sqe_len = (uint32_t)(sqe_end - sqe) - 4;	/* minus the version dword */
+	copy_in(G_SQE, sqe + 4, sqe_len);
+	wr32(GREG(0x830), GVA_SQE);			/* CP_SQE_INSTR_BASE (A6xx) */
+	wr32(GREG(0x831), 0);
+	wr32(GREG(0x800), GVA_RING);			/* CP_RB_BASE */
+	wr32(GREG(0x801), 0);
+	wr32(GREG(0x802), 0x0800020c);			/* CP_RB_CNTL: 32K, no rptr writeback */
+	wptr = 0;
+	con_hex2(" sqe", "len=", sqe_len, "base=", rd32(GREG(0x830)));
+	con_hex2(" rb", "base=", rd32(GREG(0x800)), "cntl=", rd32(GREG(0x802)));
+	wr32(GREG(0x808), 1);				/* CP_SQE_CNTL: start */
+	con_hex2(" cp", "status=", rd32(GREG(0x210)), "fsr=", rd32(c + CB_FSR));
+
+	step("CP_ME_INIT");
+	pkt7(0x48, 8);
+	ring(0x2f);
+	ring(3);
+	ring(0x20000000);
+	for (int i = 0; i < 5; i++)
+		ring(0);
+	if (flush_wait("me_init")) {
+		con_hex2(" cb", "fsr=", rd32(c + CB_FSR), "far=", rd32(c + CB_FAR));
+		return;
+	}
+
+	step("zap shader via TrustZone (PAS 13)");
+	if (zap_load()) {
+		/* mainline fallback when no zap is available: leave secure mode directly */
+		con_str(" zap", "failed - writing RBBM_SECVID_TRUST_CNTL = 0 instead");
+		wr32(GREG(0xf400), 0);
+	} else {
+		pkt7(0x66, 1);				/* CP_SET_SECURE_MODE 0 */
+		ring(0);
+		if (flush_wait("secure mode off"))
+			return;
+	}
+
+	step("CP_MEM_WRITE 0xcafef00d");
+	pkt7(0x3d, 3);
+	ring(GVA_TARGET);
+	ring(0);
+	ring(0xcafef00d);
+	pkt7(0x26, 0);					/* CP_WAIT_FOR_IDLE */
+	flush_wait("mem write");
+	for (int i = 0; i < 100 && rd32(G_TARGET) != 0xcafef00d; i++)
+		mdelay(1);
+	con_hex2("TARGET", "now=", rd32(G_TARGET), "want=", 0xcafef00d);
+	con_line(rd32(G_TARGET) == 0xcafef00d ? "*** THE GPU EXECUTED OUR COMMANDS ***" :
+		 "target unchanged", rd32(G_TARGET) == 0xcafef00d ? GREEN : YELLOW);
+	con_hex2(" cb", "fsr=", rd32(c + CB_FSR), "far=", rd32(c + CB_FAR));
+	crumb("stage 4-5 finished");
 }
 
 void gpu_probe(void)
