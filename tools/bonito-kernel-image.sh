@@ -37,7 +37,7 @@ python3 tools/mkadt.py $O/bonito-$MEM.adt $flag 2>/dev/null
 IOSARGS="unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1 ufsrw=1 rootrw=1 sweetfb_noconsole=1 sweetfb_hz=30"
 if [ "${ROOT:-md}" = emmc ] && [ "${IOS:-1}" = 1 ]; then EXTRA="$IOSARGS $EXTRA"; fi
 if [ "${ROOT:-md}" = emmc ]; then RD=rd=ufsroot0; RDARG=(); else RD=rd=md0; RDARG=(--ramdisk $O/sweet-init); fi
-ARGS="debug=0xc serial=3 cpus=${CPUS:-1} keepsyms=1 -enable_kprintf_spam -noprogress $RD"
+ARGS="debug=0xc serial=3 cpus=${CPUS:-8} keepsyms=1 -enable_kprintf_spam -noprogress $RD"
 # TOUCH=1: enable the bonito RMI4 touch driver (patch 0084); keys/USB stay off.
 if [ "${TOUCH:-0}" = 1 ]; then TOUCHARG=""; else TOUCHARG="sweettouch=0 "; fi
 if [ "${KEYS:-0}" = 1 ]; then KEYSARG=""; else KEYSARG="sweetkeys=0 "; fi

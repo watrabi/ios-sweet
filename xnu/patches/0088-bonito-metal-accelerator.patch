@@ -378,7 +378,7 @@ index ab6da99..522e301 100644
  	while (off < size) {
  		size_t chunk = (size_t)MIN((uint64_t)SF_BUF, size - off);
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
-index c61ce00..27229ec 100644
+index c61ce00..e927931 100644
 --- a/bsd/dev/sweet_gpu.c
 +++ b/bsd/dev/sweet_gpu.c
 @@ -46,9 +46,11 @@ void sweet_gpu_init(void);
@@ -525,7 +525,52 @@ index c61ce00..27229ec 100644
  	if (gpu_dbg) {
  		a6_log("debug: bring-up in %u s\n", gpu_dbg);
  		IOSleep(gpu_dbg * 1000);
-@@ -296,6 +366,10 @@ sweet_gpu_init(void)
+@@ -287,15 +357,55 @@ gpu_thread(void *arg __unused, wait_result_t wr __unused)
+ 	thread_block(THREAD_CONTINUE_NULL);
+ }
+ 
++/*
++ * bonito: both CPU clusters at their top frequency through the SDM670 cpufreq-hw block (mainline
++ * qcom-cpufreq-hw: domain 0 little 0x17d43000, domain 1 big 0x17d45800; enable +0x0, LUT +0x110 with
++ * 32-byte rows, lval [7:0] x 19.2 MHz, PERF_STATE +0x920). ABL leaves the A55s at the top (1708.8 MHz) and
++ * the A75s at index 0 (300 MHz). Boot-arg sweetcpumax=0 leaves them alone.
++ */
++static void
++sweet_cpufreq_max(void)
++{
++	uint32_t on = 1;
++	PE_parse_boot_argn("sweetcpumax", &on, sizeof(on));
++	if (!on || !sweet_gpu_board_bonito()) {
++		return;
++	}
++	static const uint64_t dom[2] = { 0x17d43000ULL, 0x17d45800ULL };
++	for (unsigned d = 0; d < 2; d++) {
++		if (!(a6_rd(dom[d]) & 1)) {
++			a6_log("cpufreq: domain %u not enabled by firmware\n", d);
++			continue;
++		}
++		uint32_t top = 0, prev = 0;
++		for (uint32_t i = 0; i < 16; i++) {
++			uint32_t lval = a6_rd(dom[d] + 0x110 + 32 * i) & 0xff;
++			if (i > 0 && lval == prev) {
++				break;
++			}
++			top = i;
++			prev = lval;
++		}
++		uint32_t was = a6_rd(dom[d] + 0x920);
++		a6_wr(dom[d] + 0x920, top);
++		a6_log("cpufreq: domain %u perf state %u -> %u (%u MHz)\n", d, was, top, prev * 192 / 10);
++	}
++}
++
+ void
+ sweet_gpu_init(void)
+ {
++	sweet_cpufreq_max();
+ 	uint32_t on = 0;
+ 	PE_parse_boot_argn("sweetgpu", &on, sizeof(on));
+ 	if (!on) {
  		return;
  	}
  	PE_parse_boot_argn("sweetgpudbg", &gpu_dbg, sizeof(gpu_dbg));
@@ -536,7 +581,7 @@ index c61ce00..27229ec 100644
  	vm_offset_t va = 0;
  	if (kmem_alloc_contig(kernel_map, &va, A6_POOL_SIZE, PAGE_MASK, 0, (ppnum_t)(atop_64(A6_POOL_ALIGN) - 1),
  	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
-@@ -305,7 +379,15 @@ sweet_gpu_init(void)
+@@ -305,7 +415,15 @@ sweet_gpu_init(void)
  	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)va);
  	a6_init_state(&gpu, ptoa_64(pn));
  	pool_kva = va;
@@ -553,7 +598,7 @@ index c61ce00..27229ec 100644
  	thread_t thread;
  	if (kernel_thread_start(gpu_thread, NULL, &thread) == KERN_SUCCESS) {
  		thread_deallocate(thread);
-@@ -318,6 +400,107 @@ sweet_gpu_ready(void)
+@@ -318,6 +436,107 @@ sweet_gpu_ready(void)
  	return gpu_ready;
  }
  
@@ -661,7 +706,7 @@ index c61ce00..27229ec 100644
  /* ---- the panel ---- */
  
  /*
-@@ -422,18 +605,19 @@ static uint64_t stat_frames, stat_clean_abs, stat_gpu_abs;
+@@ -422,18 +641,19 @@ static uint64_t stat_frames, stat_clean_abs, stat_gpu_abs;
  /*
   * Blit a mapped surface, scaled to fit and centred, into the panel memory
   * (rows of fb_pitch bytes). The CPU rendered it through the cache: clean
@@ -685,7 +730,7 @@ index c61ce00..27229ec 100644
  	}
  	uint64_t t1 = mach_absolute_time();
  
-@@ -455,14 +639,20 @@ sweet_gpu_present(int s, uint32_t offset, uint32_t w, uint32_t h, uint32_t pitch
+@@ -455,14 +675,20 @@ sweet_gpu_present(int s, uint32_t offset, uint32_t w, uint32_t h, uint32_t pitch
  	lck_mtx_lock(&sweet_gpu_lock);
  	uint32_t n = a6_blit_ib(&gpu, &b, dw);
  	a6_write(a6_pool_pa(&gpu, IB_OFF), dw, 4ULL * n);
@@ -714,7 +759,7 @@ index c61ce00..27229ec 100644
  	}
  	lck_mtx_unlock(&sweet_gpu_lock);
  	uint64_t t2 = mach_absolute_time();
-@@ -480,4 +670,446 @@ sweet_gpu_present(int s, uint32_t offset, uint32_t w, uint32_t h, uint32_t pitch
+@@ -480,4 +706,446 @@ sweet_gpu_present(int s, uint32_t offset, uint32_t w, uint32_t h, uint32_t pitch
  	*out_dw = b.dw;
  	return rc;
  }
