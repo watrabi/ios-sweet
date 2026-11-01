@@ -214,5 +214,14 @@ Run (after the user unlocks the bootloader - `fastboot flashing unlock` WIPES An
   0x30080), PDC enable 0x80000001; legacy load of a630_gmu.bin into ITCM; **GMU BOOTED, init 0xbabeface**,
   no SMMU fault (FSR 0x400 = format bits only). **RSC wake ack (GMU_RSCC_CONTROL_ACK bit 1) TIMED OUT**
   (status0 0x01000000, seq idle) - mainline treats that as an error; likely relevant for GX power (stage 3).
-- Next (stage 3, legacy path): investigate the RSC ack, then gfx_rail_on + sptprac_enable, legacy HFI
+- RSC ack: mainline only sends the RSC wake request when it put the PDC to sleep earlier
+  (a6xx_rpmh_start tests GMU_STATUS_PDC_SLEEP), so on a cold boot the timeout is probably benign.
+- **Stage 3 run 1** (shim-gpu3.img): cmd-db found at 0x85fe0000 (magic 0x0c0330db); votes gx_max
+  0x00c00305 (SVS_L1), cx 0x00300302; OOB BOOT_SLUMBER acked; SPTPRAC on (0x28); **GX GDSC ON
+  (0xf8222000)**, gpu_memnoc_gfx/snoc_dvm_gfx branches now running; RBBM_STATUS 1 and **CP_SCRATCH0
+  write/read OK** - GPU core registers answer. But all 5 HFI v1 messages got no reply (ctrl 0) and
+  GMU2HOST_INTR_INFO showed bit 23 = CM3_FAULT. Cause: skipped a6xx_gmu_hfi_start (HFI_CTRL_INIT=1,
+  poll HFI_CTRL_STATUS bit 0), which mainline runs after sptprac and before any message.
+  shim-gpu3b.img adds it plus a CM3_FAULT readout after each step.
+- Earlier plan for stage 3: then gfx_rail_on + sptprac_enable, legacy HFI
   (v1) start, OOB GPU set -> GX GDSC on; then zap shader (TZ PAS, a615_zap), SQE, ring, first commands.

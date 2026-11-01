@@ -396,6 +396,8 @@ static void gmu_boot(void)
 #define GMU_G2H_CLR		0x1f991
 #define GMU_G2H_INFO		0x1f992
 #define GMU_H2G_SET		0x1f994
+#define GMU_HFI_CTRL_INIT	0x1f986
+#define G2H_CM3_FAULT		(1u << 23)
 #define QHDR(q)			(GMEM_HFI + 24 + 48 * (q))
 #define QDATA(q)		(GMEM_HFI + 0x1000 * ((q) + 1))
 #define QSIZE			1024
@@ -541,6 +543,9 @@ static void gmu_power_up(void)
 	}
 	con_hex2("VOTES", "gx_max=", gx[NGPU - 1], "cx=", cx[1]);
 
+	wr32(GMU_REG(GMU_G2H_CLR), 0xffffffff);
+	con_hex2("G2H", "info=", rd32(GMU_REG(GMU_G2H_INFO)), "fault=", rd32(GMU_REG(GMU_G2H_INFO)) & G2H_CM3_FAULT);
+
 	/* a6xx_gmu_gfx_rail_on: max-level indices + OOB BOOT_SLUMBER (22 -> 30) */
 	con_str("STEP", "gfx rail on (OOB boot-slumber)");
 	wr32(GMU_REG(GMU_BOOT_SLUMBER), 0);
@@ -560,6 +565,15 @@ static void gmu_power_up(void)
 		} else
 			mdelay(1);
 	con_hex2(rc ? " sptprac FAIL" : " sptprac on", "status=", rd32(GMU_REG(GMU_SPTPRAC_STATUS)), 0, 0);
+
+	/* a6xx_gmu_hfi_start: the GMU sets up its queues before any message */
+	con_str("STEP", "HFI_CTRL_INIT");
+	wr32(GMU_REG(GMU_HFI_CTRL_INIT), 1);
+	rc = wait_bit(GMU_REG(GMU_HFI_CTRL), 1, 1, 100);
+	con_hex2(rc ? " hfi NOT ready" : " hfi ready", "status=", rd32(GMU_REG(GMU_HFI_CTRL)),
+		 "fault=", rd32(GMU_REG(GMU_G2H_INFO)) & G2H_CM3_FAULT);
+	if (rc)
+		return;
 
 	/* a6xx_hfi_start_v1 */
 	con_str("STEP", "HFI v1: init, version, perf, bw, test");
@@ -613,6 +627,7 @@ static void gmu_power_up(void)
 	con_hex2("HFI", "init=", (uint32_t)r_init, "ver=", (uint32_t)r_ver);
 	con_hex2(" hfi", "perf=", (uint32_t)r_perf, "bw=", (uint32_t)r_bw);
 	con_hex2(" hfi", "test=", (uint32_t)r_test, "ctrl=", rd32(GMU_REG(GMU_HFI_CTRL)));
+	con_hex2(" g2h", "info=", rd32(GMU_REG(GMU_G2H_INFO)), "fault=", rd32(GMU_REG(GMU_G2H_INFO)) & G2H_CM3_FAULT);
 
 	/* OOB GPU_SET (legacy 16 -> 24): the GMU powers the GX side */
 	con_str("STEP", "OOB GPU_SET");
