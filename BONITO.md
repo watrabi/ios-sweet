@@ -99,7 +99,13 @@ Three boots 2026-10-31:
   host 8-bit (hctl 0x0d34, clk 0x0e0407); GPT header re-read via CMD18 matches; **16 MiB CMD18 + ADMA
   (64 KiB descriptors, auto-CMD12) in 367 ms = 43.5 MiB/s**. HS200 (~2x) is a later option.
 
-## XNU eMMC driver: patch 0082 (commit 4c9b9d8), not yet built
+## XNU eMMC driver: patch 0082 (commit 4c9b9d8) - WORKS on hardware (read-only)
+- CI run 41254845073 (macos-14, 2026-11-01 00:00-00:06 UTC) success; kernel in xnu/out-0082.
+- Boot shim-boot-0082-emmc-ro.img (wide RAM, rd=ufsroot0, no ufsrw): `SWEET EMMC: power irq 0x2/0x4, ocr
+  0xc0ff8080, EXT_CSD rev 8, 122142720 sectors, cache off` / `high speed 48 MHz, 8-bit bus` / `"userdata" on
+  LUN 0: first block 0x211c80, 51163 MiB, read-only, DMA at 0xa5f1c000` / `BSD root: ufsroot0` ->
+  hfs: unknown Volume Signature e93f -> cannot mount root (expected: userdata holds no HFS yet).
+- Patch 0083 = ios-flame's iig fix; macos-15 test build run 41255314009.
 - Transport inside sweet_ufs.c selected by ADT /sweet-emmc (mkadt --bonito); same sequence as the shim.
 - First test (read-only, safe): `ROOT=emmc tools/bonito-kernel-image.sh xnu/out/<new kernel> wide` ->
   expect `SWEET EMMC: ... high speed 48 MHz, 8-bit bus` and `SWEET EMMC: "userdata" ... read-only`,
