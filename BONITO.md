@@ -280,3 +280,16 @@ iOS frames are scaled onto the panel by the GPU's 2D engine (full status bar + d
 - Pitfall: the bigger payload (firmware in the ADT) is placed by ABL inside the kernel's RAM range. shim/loader.c now
   checks only the range it writes, and moves the payload otherwise.
 - Boot time: /sbin/mount (mount-phase-2) spends ~98 s looking for the APFS data volume our HFS+ root lacks.
+
+### Metal / wallpaper plan (2026-11-01)
+Wallpaper (ios-flame HANDOFF.md, "Black wallpaper fixed"), not dependent on Metal:
+1. MAC addresses in the ADT /chosen. Done in mkadt.py.
+2. A SweetAMFI stand-in that answers trust queries (flame 0103).
+3. Rewrite the default wallpaper's HEIC layers as PNG (there's no HEVC decoder), then run `lsreg -r`.
+
+Metal, in order:
+1. A file path onto the running phone: USB ECM plus flame's 0091 file server. sweet_usb.c needs the sdm845 GCC CBCR offsets:
+   master 0xf00c, sleep 0xf010, utmi 0xf014, cfg-noc 0x502c, aggre 0x8201c, ahb2phy 0x6a004, clkref 0x8c008.
+2. Kernel: flame 0096, 0097, 0115 and 0116, plus the GPU fixes 0104–0109, 0113 and 0117–0119.
+3. macOS CI: Turnip for iOS (A615 is gen1), the metal2vulkan bridge, and SweetMetal2.bundle.
+4. Install the bundle and boot with sweetmtl=2. Speed also needs a GPU frequency vote and a DDR bandwidth vote (the GMU HFI fault blocks these).

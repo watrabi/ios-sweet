@@ -132,6 +132,11 @@ def build(seed=None, qemu=False, highmem=False, bonito=None):
         ('effective-production-status-ap', u32(0)),
         ('certificate-security-mode', u32(1)),
         ('effective-security-mode-sep', u32(1)),
+        # MobileGestalt's WifiAddress reads these, else installd waits 5 s per bundle and app
+        # extensions (PosterBoard's wallpaper providers) register late/empty (ios-flame HANDOFF.md).
+        ('mac-address-wifi0', bytes([0x02, 0x50, 0x49, 0x58, 0x45, 0x4c])),
+        ('mac-address-bluetooth0', bytes([0x02, 0x50, 0x49, 0x58, 0x45, 0x4d])),
+        ('mac-address-ethernet0', bytes([0x02, 0x50, 0x49, 0x58, 0x45, 0x4e])),
     ] + ([('sweet-board', cstr('bonito'))] if bonito else []),  # bsd/dev/sweet_touch.c (0084)
     [node('memory-map', [ph()]),
         # Local boot policy (kern_csr.c): SIP relaxed like `csrutil disable`
