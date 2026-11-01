@@ -132,7 +132,8 @@ def build(seed=None, qemu=False, highmem=False, bonito=None):
         ('effective-production-status-ap', u32(0)),
         ('certificate-security-mode', u32(1)),
         ('effective-security-mode-sep', u32(1)),
-    ], [node('memory-map', [ph()]),
+    ] + ([('sweet-board', cstr('bonito'))] if bonito else []),  # bsd/dev/sweet_touch.c (0084)
+    [node('memory-map', [ph()]),
         # Local boot policy (kern_csr.c): SIP relaxed like `csrutil disable`
         # (lp-sip0: untrusted kexts, unrestricted FS, task_for_pid, kernel
         # debugger, dtrace, nvram), lp-sip1: unauthenticated (unsealed) root.

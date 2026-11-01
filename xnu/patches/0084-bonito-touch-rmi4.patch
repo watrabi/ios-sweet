@@ -1,0 +1,320 @@
+diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
+index 03defe6..ad680a8 100644
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -14,6 +14,8 @@
+ #include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++#include <libkern/libkern.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ /* Mach MIG declaration is not included by BSD's exported thread.h. */
+@@ -545,6 +547,235 @@ touch_se_init(void)
+ 	return true;
+ }
+ 
++
++/*
++ * ---- bonito (Pixel 3a XL, SDM670): Synaptics S3706B, RMI4 over I2C 0x20 ----
++ *
++ * Same SE (wrapper-1 SE1 @ 0xa84000), I2C pins (GPIO 6/7, mux 1), GCC clocks
++ * and TLMM north tile as sweet, so touch_clocks()/touch_se_init()/touch_msg()
++ * are shared. Board differences (mainline sdm670-google-common.dtsi), proven
++ * with the bonito shim's touch probe (shim/touch.c, BONITO.md):
++ *   1.8 V rail = PM660 GPIO 12 output-high (SPMI SID 0, peripheral 0xcb),
++ *   reset GPIO 99, IRQ GPIO 125 (north), "ts-switch" GPIO 135 (west) low.
++ * F12's data area starts with 8-byte object records
++ * (type, x lo/hi, y lo/hi, z, wx, wy) in panel pixels (1080x2160).
++ * Selected by the ADT property /chosen/sweet-board = "bonito".
++ */
++#define BON_WEST_PA      0x03500000u
++#define BON_SPMI_CORE    0x0c440000u
++#define BON_SPMI_CNFG    0x0c40a000u
++#define BON_SPMI_OBS     0x0e600000u
++#define BON_SPMI_CHNLS   0x0c600000u
++#define BON_RMI          0x20u
++#define BON_W            1080
++#define BON_H            2160
++
++static vm_offset_t bon_spmi_core, bon_spmi_cnfg, bon_spmi_obs;
++
++static bool
++bonito_board(void)
++{
++	DTEntry chosen;
++	void const *prop;
++	unsigned int size;
++	return SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
++	       SecureDTGetProperty(chosen, "sweet-board", &prop, &size) == kSuccess &&
++	       size >= 6 && strncmp((const char *)prop, "bonito", 6) == 0;
++}
++
++static int
++bon_spmi_wait(vm_offset_t ch)
++{
++	for (unsigned i = 0; i < 1000; ++i) {
++		uint32_t st = touch_rd(ch, 0x08);
++		if (st & 1u) {
++			return (st & 0xeu) ? EIO : 0;
++		}
++		delay(10);
++	}
++	return ETIMEDOUT;
++}
++
++/* PM660 GPIO 12 -> digital output high. Nothing else on the PMIC is touched. */
++static int
++bonito_power_on(void)
++{
++	bon_spmi_core = ml_io_map(BON_SPMI_CORE, 0x2000);
++	bon_spmi_cnfg = ml_io_map(BON_SPMI_CNFG, 0x1000);
++	bon_spmi_obs = ml_io_map(BON_SPMI_OBS, 0x10000);
++	if (!bon_spmi_core || !bon_spmi_cnfg || !bon_spmi_obs) {
++		return ENOMEM;
++	}
++	uint32_t ver = touch_rd(bon_spmi_core, 0), napid = touch_rd(bon_spmi_core, 4) & 0x7ffu;
++	if (ver < 0x50000000u || ver >= 0x70000000u || !napid || napid > 512) {
++		printf("SWEET TOUCH: unsupported SPMI arbiter %#x\n", ver);
++		return ENXIO;
++	}
++	int apid = -1;
++	for (uint32_t i = 0; i < napid; ++i) {
++		uint32_t m = touch_rd(bon_spmi_core, 0x900 + 4 * i);
++		if (m && ((m >> 8) & 0xfffu) == 0x0cbu &&
++		    (touch_rd(bon_spmi_cnfg, 0x700 + 4 * i) & 7u) == 0) {
++			apid = (int)i;     /* PM660 (SID 0) GPIO 12, owned by the apps EE */
++			break;
++		}
++	}
++	if (apid < 0) {
++		printf("SWEET TOUCH: PM660 GPIO12 not mapped to the apps EE\n");
++		return EPERM;
++	}
++	vm_offset_t ch = ml_io_map(BON_SPMI_CHNLS + 0x10000u * (uint32_t)apid, 0x100);
++	vm_offset_t obs = bon_spmi_obs + 0x80u * (uint32_t)apid;
++	if (!ch) {
++		return ENOMEM;
++	}
++	/* subtype: LV/MV GPIOs (>= 0x10) take mode 1 + DIG_OUT_SOURCE 0x80 for high */
++	touch_wr(obs, 0x00, (1u << 27) | (0x05u << 4));         /* EXT_READL 0x05 */
++	int err = bon_spmi_wait(obs);
++	uint32_t subtype = err ? 0 : (touch_rd(obs, 0x18) & 0xffu);
++	static const uint8_t lvmv[][2] = {{0x40, 0x01}, {0x44, 0x80}, {0x46, 0x80}};
++	static const uint8_t legacy[][2] = {{0x40, 0x11}, {0x46, 0x80}};
++	const uint8_t (*seq)[2] = subtype >= 0x10 ? lvmv : legacy;
++	unsigned n = subtype >= 0x10 ? 3 : 2;
++	for (unsigned i = 0; i < n && !err; ++i) {
++		touch_wr(ch, 0x10, seq[i][1]);
++		touch_wr(ch, 0x00, (0u << 27) | ((uint32_t)seq[i][0] << 4));   /* EXT_WRITEL */
++		err = bon_spmi_wait(ch);
++	}
++	printf("SWEET TOUCH: PM660 GPIO12 (apid %d, subtype %#x) -> output high: %d\n",
++	    apid, subtype, err);
++	return err;
++}
++
++static int bon_page = -1;
++
++static int
++bon_rmi_read(unsigned addr, uint8_t *buf, unsigned len)
++{
++	if ((int)(addr >> 8) != bon_page) {
++		const uint8_t sel[2] = {0xff, (uint8_t)(addr >> 8)};
++		int err = touch_msg(BON_RMI, sel, 2, NULL, 0, false);
++		if (err) {
++			bon_page = -1;
++			return err;
++		}
++		bon_page = (int)(addr >> 8);
++	}
++	return touch_read(BON_RMI, (uint16_t)(addr & 0xffu), false, buf, len);
++}
++
++static int
++touch_rmi4_poll(unsigned data)
++{
++	uint8_t d[TOUCH_MAX * 8];
++	int x[TOUCH_MAX] = {0}, y[TOUCH_MAX] = {0};
++	uint32_t mask = 0;
++	int err = bon_rmi_read(data, d, sizeof(d));
++	if (err) {
++		return err;
++	}
++	for (unsigned i = 0; i < TOUCH_MAX; ++i) {
++		const uint8_t *o = d + 8 * i;
++		/* object type: 1 finger, 2 stylus, 6 glove (Linux rmi_2d_sensor) */
++		if (o[0] != 1 && o[0] != 2 && o[0] != 6) {
++			continue;
++		}
++		int px = o[1] | (o[2] << 8), py = o[3] | (o[4] << 8);
++		if (px >= BON_W || py >= BON_H) {
++			continue;
++		}
++		mask |= 1u << i;
++		x[i] = px;
++		y[i] = py;
++	}
++	touch_report(mask, x, y);
++	return 0;
++}
++
++static void
++touch_bonito(void)
++{
++	printf("SWEET TOUCH: bonito: mapping GCC/TLMM/SE\n");
++	st.gcc = ml_io_map(TOUCH_GCC_PA, 0x60000);
++	st.gpio = ml_io_map(TOUCH_NORTH_PA, 0x80000);
++	vm_offset_t west = ml_io_map(BON_WEST_PA, 0x88000);
++	st.se = ml_io_map(TOUCH_SE_PA, 0x4000);
++	if (!st.gcc || !st.gpio || !west || !st.se) {
++		printf("SWEET TOUCH: MMIO mapping failed\n");
++		return;
++	}
++	if (!touch_clocks() || !touch_se_init()) {
++		return;
++	}
++	/* reset asserted (99), ts-switch low (135, west), IRQ input (125), I2C mux */
++	touch_gpio(99, 0, 3, 0, true, false);
++	vm_offset_t north = st.gpio;
++	st.gpio = west;
++	touch_gpio(135, 0, 0, 0, true, false);
++	st.gpio = north;
++	touch_gpio(125, 0, 0, 0, false, false);
++	touch_gpio(6, 1, 0, 0, false, false);
++	touch_gpio(7, 1, 0, 0, false, false);
++	if (bonito_power_on()) {
++		return;
++	}
++	touch_wait(20);
++	touch_gpio(99, 0, 3, 0, true, true);
++	touch_wait(300);                        /* syna,reset-delay-ms 200 */
++
++	unsigned f01_q = 0, f01_d = 0, f12_d = 0;
++	st.probing = true;
++	for (unsigned a = 0xe9; a >= 0x0a; a -= 6) {
++		uint8_t e[6];
++		int err = bon_rmi_read(a, e, sizeof(e));
++		if (err) {
++			printf("SWEET TOUCH: RMI4 PDT read at %#x failed %d\n", a, err);
++			break;
++		}
++		if (!e[5]) {
++			break;
++		}
++		printf("SWEET TOUCH: RMI4 F%02x query %#x cmd %#x ctrl %#x data %#x\n",
++		    e[5], e[0], e[1], e[2], e[3]);
++		if (e[5] == 0x01) {
++			f01_q = e[0];
++			f01_d = e[3];
++		} else if (e[5] == 0x12) {
++			f12_d = e[3];
++		}
++	}
++	st.probing = false;
++	if (!f01_q || !f12_d) {
++		printf("SWEET TOUCH: no RMI4 F01/F12; stopping\n");
++		return;
++	}
++	uint8_t q[21] = {0}, status = 0;
++	(void)bon_rmi_read(f01_q, q, sizeof(q));
++	(void)bon_rmi_read(f01_d, &status, 1);
++	char pid[11];
++	for (unsigned i = 0; i < 10; ++i) {
++		pid[i] = (q[11 + i] >= 0x20 && q[11 + i] < 0x7f) ? (char)q[11 + i] : 0;
++	}
++	pid[10] = 0;
++	printf("SWEET TOUCH: selected Synaptics %s (RMI4, status %#x), %dx%d, poll=10ms\n",
++	    pid, status, BON_W, BON_H);
++	unsigned errors = 0;
++	while (!st.dead) {
++		if (touch_rmi4_poll(f12_d)) {
++			if ((errors++ % 100u) == 0) {
++				printf("SWEET TOUCH: RMI4 read error (irq %#x)\n", st.irq_status);
++			}
++			if (errors == 10) {
++				touch_report(0, st.x, st.y);
++			}
++		} else {
++			errors = 0;
++		}
++		touch_wait(10);
++	}
++	touch_report(0, st.x, st.y);
++}
++
+ static void
+ touch_thread(void *arg, wait_result_t result)
+ {
+@@ -558,6 +789,10 @@ touch_thread(void *arg, wait_result_t result)
+ 	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
+ 	printf("SWEET TOUCH: starting in %u s\n", delay_s);
+ 	touch_wait(delay_s * 1000u);
++	if (bonito_board()) {
++		touch_bonito();
++		goto out;
++	}
+ 	printf("SWEET TOUCH: mapping GCC/TLMM/SE7\n");
+ 	st.gcc = ml_io_map(TOUCH_GCC_PA, 0x60000);
+ 	st.gpio = ml_io_map(TOUCH_NORTH_PA, 0x5b000);
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index 27bc49d..7ea1351 100644
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -368,6 +368,7 @@ protected:
+ private:
+ 	IOLock *fLock;
+ 	int fLogicalW, fLogicalH, fOffX, fOffY;
++	int fPanelW, fPanelH;            /* touch/panel pixels (boot video) */
+ 	bool fDown[SWEET_TOUCH_FINGERS];
+ 	bool fEdge[SWEET_TOUCH_FINGERS];
+ 	IOFixed fX[SWEET_TOUCH_FINGERS];
+@@ -434,14 +435,19 @@ SweetHIDTouch::start(IOService *provider)
+ 	}
+ 	int native = 0;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+-	fLogicalW = native ? 1080 : 1125;
+-	fLogicalH = native ? 2400 : 2436;
+-	fOffX = (fLogicalW - 1080) / 2;
+-	fOffY = (fLogicalH - 2400) / 2;
++	/* Touch reports panel pixels: sweet 1080x2400, bonito 1080x2160. */
++	fPanelW = PE_state.video.v_width ? (int)PE_state.video.v_width : 1080;
++	fPanelH = PE_state.video.v_height ? (int)PE_state.video.v_height : 2400;
++	fLogicalW = native ? fPanelW : 1125;
++	fLogicalH = native ? fPanelH : 2436;
++	fOffX = (fLogicalW - fPanelW) / 2;
++	fOffY = (fLogicalH - fPanelH) / 2;
+ 	/* The digitizer covers the main display (backboardd maps it 1:1). */
+ 	setProperty("DisplayIntegrated", kOSBooleanTrue);
+-	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
+-	setProperty("SurfaceHeight", (unsigned long long)(151 << 16), 32);
++	/* mm, 16.16: sweet 68x151; bonito (2160 rows) 69x137 per its device tree */
++	bool bonito = fPanelH == 2160;
++	setProperty("SurfaceWidth", (unsigned long long)((bonito ? 69 : 68) << 16), 32);
++	setProperty("SurfaceHeight", (unsigned long long)((bonito ? 137 : 151) << 16), 32);
+ 	gSweetTouch = this;
+ 	registerService();
+ 	IOLog("SWEET HID: touch registered\n");
+@@ -458,8 +464,8 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 	if (finger < 0 || finger >= SWEET_TOUCH_FINGERS) {
+ 		return;
+ 	}
+-	x = x < 0 ? 0 : (x > 1079 ? 1079 : x);
+-	y = y < 0 ? 0 : (y > 2399 ? 2399 : y);
++	x = x < 0 ? 0 : (x > fPanelW - 1 ? fPanelW - 1 : x);
++	y = y < 0 ? 0 : (y > fPanelH - 1 ? fPanelH - 1 : y);
+ 
+ 	IOLockLock(fLock);
+ 	bool was = fDown[finger];
+@@ -472,8 +478,8 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 		return;
+ 	}
+ 	if (!was && down) {
+-		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
+-		    y < SWEET_TOUCH_EDGE_PX || y > 2399 - SWEET_TOUCH_EDGE_PX;
++		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > fPanelW - 1 - SWEET_TOUCH_EDGE_PX ||
++		    y < SWEET_TOUCH_EDGE_PX || y > fPanelH - 1 - SWEET_TOUCH_EDGE_PX;
+ 	}
+ 
+ 	collection = IOHIDEvent::digitizerEvent(now, 0, kIOHIDDigitizerTransducerTypeHand, false, 0, 0, 0);

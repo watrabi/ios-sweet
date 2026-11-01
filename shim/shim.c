@@ -12,6 +12,7 @@
 #include "loader.h"
 #include "emmc.h"
 #include "fdt.h"
+#include "touch.h"
 
 #define IMEM_RESTART_REASON	0x146aa65cUL	/* qcom,msm-imem restart_reason@65c */
 #define RESTART_BOOTLOADER	0x77665500U
@@ -447,7 +448,9 @@ void shim_main(uint64_t dtb)
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
 	stage = "loader";
 	con_clear(RED);
-#if defined(EMMCPROBE)
+#if defined(TOUCHPROBE)
+	con_str("SHIM", "bonito touch probe");
+#elif defined(EMMCPROBE)
 	con_str("SHIM", "bonito emmc probe");
 #elif defined(MEMWALK)
 	con_str("SHIM", "bonito memwalk");
@@ -463,6 +466,13 @@ void shim_main(uint64_t dtb)
 	con_line("PAGE 1/2  live FDT memory map (base 0 = dynamic pool)", GREEN);
 	fdt_dump_memmap(dtb);
 	con_skip();
+#ifdef TOUCHPROBE
+	delay_ms(3000);
+	con_clear(RED);
+	stage = "touch probe";
+	touch_probe();
+	reset(300);
+#endif
 #ifdef EMMCPROBE
 	delay_ms(5000);
 	con_clear(RED);
