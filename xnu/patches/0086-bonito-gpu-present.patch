@@ -1172,10 +1172,10 @@ index 0000000..3bb9f03
 +#endif
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 new file mode 100644
-index 0000000..9aa623f
+index 0000000..c61ce00
 --- /dev/null
 +++ b/bsd/dev/sweet_gpu.c
-@@ -0,0 +1,478 @@
+@@ -0,0 +1,483 @@
 +/*
 + * The Adreno 615 (bonito; ported from ios-flame's Adreno 640 glue, MIT) in the kernel: the environment for the shared core
 + * (sweet_a6xx.c, also built into the userland tool phone/gpu), bring-up in
@@ -1353,9 +1353,11 @@ index 0000000..9aa623f
 +
 +/*
 + * SMC64 to TrustZone (zap shader PAS calls): x0..x7 in, x0..x3 out. bonito has no /dev/pmem.
-+ * Like Linux's qcom_scm-smc.c: a call TZ preempts for a non-secure interrupt returns
-+ * QCOM_SCM_INTERRUPTED (1) with the resume id in x1, re-issued as x0 with the same args;
-+ * QCOM_SCM_V2_EBUSY (-12) retries the whole call. (The shim ran with interrupts off.)
++ * Like Linux's qcom_scm-smc.c __scm_smc_do_quirk (ARM_SMCCC_QUIRK_QCOM_A6): a call TZ
++ * preempts for a non-secure interrupt returns QCOM_SCM_INTERRUPTED (1); it is resumed by
++ * issuing x0 = 1 with the same x1..x5/x7 and x6 = the x6 TZ returned (the session).
++ * (Using x1 as the new x0 hung the whole SoC.) QCOM_SCM_V2_EBUSY (-12) retries the call.
++ * The shim never saw this: it ran with interrupts off.
 + */
 +#define SCM_INTERRUPTED 1
 +#define SCM_EBUSY       ((uint64_t)-12)
@@ -1374,6 +1376,7 @@ index 0000000..9aa623f
 +	x[1] = x1;
 +	x[2] = x2;
 +	x[3] = x3;
++	x[6] = x6;
 +}
 +
 +extern int cpu_number(void);
@@ -1390,7 +1393,7 @@ index 0000000..9aa623f
 +	}
 +	for (int busy = 0; busy < 20; busy++) {
 +		uint64_t r[8];
-+		uint64_t cmd = x[0];
++		uint64_t cmd = x[0], a6 = 0;
 +		unsigned resumes = 0;
 +		/* Stay on this CPU while TZ holds an interrupted call (interrupts still taken). */
 +		_disable_preemption();
@@ -1398,9 +1401,11 @@ index 0000000..9aa623f
 +		do {
 +			memcpy(r, x, sizeof(r));
 +			r[0] = cmd;
++			r[6] = a6;
 +			smc8(r);
 +			if (r[0] == SCM_INTERRUPTED) {
-+				cmd = r[1];
++				cmd = SCM_INTERRUPTED;
++				a6 = r[6];
 +				resumes++;
 +			}
 +		} while (r[0] == SCM_INTERRUPTED && resumes < 100000);
