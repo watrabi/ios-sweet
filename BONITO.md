@@ -162,3 +162,20 @@ Run (after the user unlocks the bootloader - `fastboot flashing unlock` WIPES An
   zero), devinfo. In backup/ (gitignored) + user's drive, SHA256SUMS verified on both.
 - Big files (iOS root image) can go on the user's FUSE drive "~/watr.lol Drive" (25 GB free); local / has
   ~0.6 GB. Untested: root/loop access through that FUSE mount.
+
+## FIRST iOS BOOT (2026-11-01 ~01:25 UTC) - reaches SpringBoard, gated on data migration
+- Image: tools/mkiosroot.sh on the SD card (/mnt/iosbuild, ext4, 14G, 12G used) from 20H392 OS/SystemOS/
+  AppOS, then sweet-root-tweaks.py (warning: no mobileactivationd system container -> data ark skipped),
+  fsck OK apart from the known journaled-volume header quirk. Flashed with tools/simg-chunks.py in 58
+  pieces (~16 min, SD-card bound). ADT now has the real iPhone X /product (research/ipsw-x/d22ap.adt via
+  tools/adt.py unwrap + lzfse CLI in ~/.local/bin).
+- Boot shim-boot-0082-ios-cpus6.img (0082 kernel, wide RAM, cpus=6, upstream iOS boot-args + ufsrw/rootrw,
+  sweetfb_noconsole=1 sweetfb_hz=30). Apple logo on screen. ~11 min, then pulled from TWRP:
+  logs/boot-ios1.txt (164 KB, 69 flushes). 6/6 CPUs up, eMMC 48 MHz 8-bit rw, `hfs: mounted iOSRoot`,
+  Apple launchd + boot tasks, keybagd (AKS stub), backboardd opens AppleCLCD (1080x2160 presented as
+  1125x2436, `display on`), `exec com.apple.datamigrator`, SpringBoard running.
+- SpringBoard main thread blocked at one pc in every sample = upstream NOTES (boot 0055n): SpringBoard
+  waits in -[BKSSystemShellService _checkIn]; backboardd holds the check-in until the first-boot data
+  migration ends (~30 min on sweet with cpus=1). Only 2 crashing daemons (driverkitd sig 9, spindump
+  SIGBUS); bluetoothd and fairplayd.H2 relaunch in a loop (expected, no hardware).
+- Next: a long boot (30-45 min) to let the migration finish; then expect lock screen (no touch yet).
