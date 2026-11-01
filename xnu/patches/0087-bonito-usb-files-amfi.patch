@@ -38,10 +38,10 @@ diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
  iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
 diff --git a/bsd/dev/sweet_files.c b/bsd/dev/sweet_files.c
 new file mode 100644
-index 0000000..8209bf1
+index 0000000..ab6da99
 --- /dev/null
 +++ b/bsd/dev/sweet_files.c
-@@ -0,0 +1,325 @@
+@@ -0,0 +1,415 @@
 +/*
 + * File server for the running iOS root, over USB Ethernet: TCP
 + * 192.168.7.2:2223 (on the Mac: 127.0.0.1:2223 through FlameBridge,
@@ -55,7 +55,10 @@ index 0000000..8209bf1
 + *   RM <path>\n                                   -> "OK\n"
 + *   CHMOD <path> <mode-octal>\n                   -> "OK\n"
 + *
-+ * Errors: "ERR <errno>\n". Paths have no spaces. Started with the USB
++ *   LIST <dir>\n                                 -> "OK <size>\n" + one "<type> <name>\n" per entry
++ *                                                    (type: d dir, f file, l link, ? other)
++ *
++ * Errors: "ERR <errno>\n". Paths are percent-encoded (%20 for a space, %25 for %; bonito). Started with the USB
 + * gadget (sweet_usb.c) when the interface comes up.
 + */
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
@@ -70,6 +73,7 @@ index 0000000..8209bf1
 +#include <sys/kpi_socket.h>
 +#include <sys/socket.h>
 +#include <sys/uio.h>
++#include <sys/dirent.h>
 +#include <netinet/in.h>
 +#include <kern/thread.h>
 +#include <kern/sched_prim.h>
@@ -231,6 +235,82 @@ index 0000000..8209bf1
 +	return err;
 +}
 +
++/* In place: %XX -> byte (bonito: paths with spaces, e.g. the wallpaper's "Head Mask.HEIC"). */
++static void
++sf_unesc(char *p)
++{
++	char *o = p;
++	for (; *p; p++) {
++		int h1, h2;
++		if (p[0] == '%' && p[1] && p[2] &&
++		    (h1 = (p[1] >= 'a' ? p[1] - 'a' + 10 : p[1] >= 'A' ? p[1] - 'A' + 10 : p[1] - '0')) >= 0 && h1 < 16 &&
++		    (h2 = (p[2] >= 'a' ? p[2] - 'a' + 10 : p[2] >= 'A' ? p[2] - 'A' + 10 : p[2] - '0')) >= 0 && h2 < 16) {
++			*o++ = (char)(h1 * 16 + h2);
++			p += 2;
++		} else {
++			*o++ = *p;
++		}
++	}
++	*o = 0;
++}
++
++/* LIST: the directory's entries as text, sent as one OK <size> reply (at most SF_BUF bytes). */
++static int
++sf_list(socket_t so, const char *path)
++{
++	vfs_context_t ctx = vfs_context_kernel();
++	vnode_t vp = NULLVP;
++	int err = vnode_lookup(path, 0, &vp, ctx);
++	if (!err && vnode_vtype(vp) != VDIR) {
++		err = ENOTDIR;
++	}
++	size_t used = 0;
++	static char dbuf[8192];
++	int eof = 0;
++	off_t pos = 0;
++	while (!err && !eof) {
++		int n = 0;
++		uio_t uio = uio_create(1, pos, UIO_SYSSPACE, UIO_READ);
++		if (!uio) {
++			err = ENOMEM;
++			break;
++		}
++		uio_addiov(uio, CAST_USER_ADDR_T(dbuf), sizeof(dbuf));
++		err = VNOP_READDIR(vp, uio, 0, &eof, &n, ctx);
++		size_t got = sizeof(dbuf) - (size_t)uio_resid(uio);
++		pos = uio_offset(uio);
++		uio_free(uio);
++		if (err || got == 0) {
++			break;
++		}
++		for (size_t o = 0; o + 8 <= got;) {
++			struct dirent *d = (struct dirent *)(void *)(dbuf + o);
++			if (d->d_reclen == 0) {
++				break;
++			}
++			if (d->d_ino && strcmp(d->d_name, ".") && strcmp(d->d_name, "..")) {
++				char t = d->d_type == DT_DIR ? 'd' : d->d_type == DT_REG ? 'f' : d->d_type == DT_LNK ? 'l' : '?';
++				int w = snprintf(sf_buf + used, SF_BUF - used, "%c %s\n", t, d->d_name);
++				if (w < 0 || used + (size_t)w >= SF_BUF) {
++					eof = 1;
++					break;
++				}
++				used += (size_t)w;
++			}
++			o += d->d_reclen;
++		}
++	}
++	if (vp != NULLVP) {
++		vnode_put(vp);
++	}
++	if (err) {
++		sf_reply(so, err, 0, false);
++		return err;
++	}
++	sf_reply(so, 0, (uint64_t)used, true);
++	return sf_send(so, sf_buf, used);
++}
++
 +static int
 +sf_get(socket_t so, const char *path)
 +{
@@ -282,6 +362,7 @@ index 0000000..8209bf1
 +		}
 +		memcpy(a, p, (size_t)(sp - p));
 +		a[sp - p] = 0;
++		sf_unesc(a);
 +		mode = (unsigned)strtoul(sp + 1, &p, 8);
 +		n = sf_dec(p);
 +		err = sf_put(so, a, (int)mode, n);
@@ -289,7 +370,14 @@ index 0000000..8209bf1
 +		sf_reply(so, err, n, true);
 +		return;
 +	}
++	if (!strncmp(line, "LIST ", 5)) {
++		sf_unesc(line + 5);
++		err = sf_list(so, line + 5);
++		printf("SWEET FILES: LIST %s -> %d\n", line + 5, err);
++		return;
++	}
 +	if (!strncmp(line, "GET ", 4)) {
++		sf_unesc(line + 4);
 +		err = sf_get(so, line + 4);
 +		printf("SWEET FILES: GET %s -> %d\n", line + 4, err);
 +		return;
@@ -303,7 +391,9 @@ index 0000000..8209bf1
 +	char *arg1 = sp + 1, *arg2 = strchr(arg1, ' ');
 +	if (arg2) {
 +		*arg2++ = 0;
++		sf_unesc(arg2);
 +	}
++	sf_unesc(arg1);
 +	if (!strcmp(line, "MKDIR")) {
 +		err = sweet_vfs_mkdir(arg1, arg2 ? (int)strtoul(arg2, NULL, 8) : 0755);
 +		if (err == EEXIST) {
