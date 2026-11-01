@@ -321,7 +321,10 @@ static void hfi_table(void)
 		uintptr_t h = t + 24 + 48 * (uintptr_t)q;
 		wr32(h + 0, 1);
 		wr32(h + 4, VA_HFI + 0x1000u * (uint32_t)(q + 1));
-		wr32(h + 8, (10u << 8) | (uint32_t)q);
+		/* legacy GMU queue ids: command 0, response 4, debug 5 (mainline a6xx_hfi_init;
+		 * the A640's newer firmware uses 0/1/2) */
+		static const uint32_t qid[3] = { 0, 4, 5 };
+		wr32(h + 8, (10u << 8) | qid[q]);
 		wr32(h + 12, 0x1000 >> 2);
 		wr32(h + 24, 1);
 		wr32(h + 28, 1);
