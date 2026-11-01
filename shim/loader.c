@@ -96,9 +96,25 @@ const char *loader_boot(uintptr_t dtb)
 	con_hex("VIRT", p->virt_base);
 	con_hex("ENTRY", p->entry_va);
 
-	/* The payload must not overlap where the kernel goes. */
-	if (rd_end > p->phys_base && rd_start < p->phys_base + p->mem_size)
-		return "ramdisk overlaps kernel memory";
+	/*
+	 * The payload must not overlap what this loader writes: the kernel's
+	 * segments, the ADT and boot_args, [phys_base, top). The rest of the
+	 * kernel's RAM is free until xnu runs. ABL places larger ramdisks
+	 * inside that range (0086 with GPU firmware): then move the payload to
+	 * the top of the kernel's RAM first.
+	 */
+	uint64_t wtop = ((p->kernel_end + pa_of_va_base + p->adt_size + PAGE_16K - 1) & ~(PAGE_16K - 1)) + PAGE_16K;
+	if (rd_end > p->phys_base && rd_start < wtop) {
+		uint64_t len = (rd_end - rd_start + 7) & ~7UL;
+		uint64_t dst = (p->phys_base + p->mem_size - len) & ~(PAGE_16K - 1);
+		if (dst < wtop || dst < rd_end)
+			return "ramdisk overlaps kernel memory (no room to move it)";
+		con_hex2("MOVE", "payload from=", rd_start, "to=", dst);
+		copy64(dst, rd_start, len);
+		rd_end = dst + (rd_end - rd_start);
+		rd_start = dst;
+		p = (const struct payload *)rd_start;
+	}
 
 	for (uint32_t i = 0; i < p->nsegs; i++) {
 		const struct payload_seg *s = &p->segs[i];
