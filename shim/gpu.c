@@ -370,14 +370,12 @@ static void gmu_boot(void)
 	rpmh_init();
 	hfi_table();
 
-	con_str("STEP", "RSC wake");
+	/* a6xx_rpmh_start only wakes the RSC after a6xx_rpmh_stop put the PDC to
+	 * sleep (GMU_STATUS_PDC_SLEEP); a cold boot skips it. Earlier probes sent
+	 * the request anyway and it never acked: just report the state now. */
 	wr32(GMU_REG(GMU_GENERAL_7), 1);
-	wr32(GMU_REG(GMU_RSCC_REQ), 1u << 1);
-	int rc = wait_bit(GMU_REG(GMU_RSCC_ACK), 1u << 1, 1, 200);
-	int rc2 = wait_bit(RSCC_REG(0x0101), 0xffffffff, 0, 10);
-	wr32(GMU_REG(GMU_RSCC_REQ), 0);
-	con_hex2(rc ? " ack TIMEOUT" : " ack ok", "ack=", rd32(GMU_REG(GMU_RSCC_ACK)), "pdc=", rd32(PDC_REG(0x1140)));
-	con_hex2(rc2 ? " seq BUSY" : " seq idle", "status0=", rd32(RSCC_REG(0x0004)), 0, 0);
+	con_hex2("RSC", "ack=", rd32(GMU_REG(GMU_RSCC_ACK)), "pdc=", rd32(PDC_REG(0x1140)));
+	con_hex2(" rsc", "status0=", rd32(RSCC_REG(0x0004)), "seqbusy=", rd32(RSCC_REG(0x0101)));
 
 	/* legacy: the whole image is ITCM content (<= 32 KiB) */
 	const uint8_t *fw = PCREL(gmu_fw), *fw_end = PCREL(gmu_fw_end);
@@ -799,6 +797,24 @@ void gpu_probe(void)
 
 	branch_on("gpucc cxo", GPUCC + GPUCC_CXO);
 	branch_on("gpucc cx_gmu", GPUCC + GPUCC_CX_GMU);
+
+	/* a6xx_gmu_resume: "use a known rate to bring up the GMU" = 200 MHz:
+	 * gpucc gmu_clk_src source 6 (GPLL0_OUT_MAIN_DIV, 300 MHz) / 1.5 (HID 2),
+	 * fed by gcc_gpu_gpll0_div_clk_src (vote 0x52004 bit 16; bit 15 GPLL0). */
+	con_str("STEP", "gmu_clk_src = 200 MHz (GPLL0 div / 1.5)");
+	wr32(GCC + 0x52004, rd32(GCC + 0x52004) | (1u << 15) | (1u << 16));
+	mdelay(1);
+	wr32(rcg + 4, (rd32(rcg + 4) & ~0x71fu) | (6u << 8) | 2u);
+	wr32(rcg, rd32(rcg) | 1u);
+	rc = wait_bit(rcg, 1, 0, 10);
+	if (rc || (rd32(rcg) & (1u << 31))) {	/* update stuck or root off */
+		wr32(rcg + 4, (rd32(rcg + 4) & ~0x71fu) | 1u);
+		wr32(rcg, rd32(rcg) | 1u);
+		wait_bit(rcg, 1, 0, 10);
+		con_hex2("  200MHz FAIL", "rcg=", rd32(rcg), "back to XO cfg=", rd32(rcg + 4));
+	} else {
+		con_hex2("  200MHz ok", "rcg=", rd32(rcg), "cfg=", rd32(rcg + 4));
+	}
 
 	con_str("STEP", "GMU register reads");
 	con_hex2("GMU", "fw_ver=", rd32(GMU_REG(GMU_FW_VERSION)), "init=", rd32(GMU_REG(GMU_INIT_RESULT)));
