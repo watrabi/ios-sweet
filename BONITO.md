@@ -223,5 +223,19 @@ Run (after the user unlocks the bootloader - `fastboot flashing unlock` WIPES An
   GMU2HOST_INTR_INFO showed bit 23 = CM3_FAULT. Cause: skipped a6xx_gmu_hfi_start (HFI_CTRL_INIT=1,
   poll HFI_CTRL_STATUS bit 0), which mainline runs after sptprac and before any message.
   shim-gpu3b.img adds it plus a CM3_FAULT readout after each step.
+- Stage 3 iterations 2026-11-01 (all committed, images shim-gpu3b..3i):
+  * gpu3b/3c: HFI_CTRL_INIT -> **SoC reset**; RAM breadcrumbs (0x17e000000) + slow steps localised it.
+  * gpu3d: SMR write 0x84000005 (sid 5 + mask 0x400, ios-flame's) reads back 0 - dropped; 0x80000005
+    sticks. IDR0 NUMSIDB = 3 (3-bit stream ids) -> no mask. Unmatched-stream global fault was the reset.
+  * gpu3e: no reset; HFI_CTRL_STATUS 0xfe -> legacy queue ids are 0/4/5 (not 0/1/2).
+  * gpu3f: **HFI ready (status 1), INIT acked rc 0**, then GMU2HOST bit 23 CM3_FAULT, later msgs time out.
+  * gpu3g/3h: mapped icache 0x4000 / dcache 0x44000 windows: no change. No SMMU fault (FSR 0x400 = format
+    only, FAR 0, GFSR 0), no F2H error msg, log/debug/dcache untouched, init result still 0xbabeface,
+    cx_busy 0x30000000 -> 0x71000000, RSC status0 0x01000000, PDC 0x80000001.
+  * gpu3i: GMU clock 200 MHz (GPLL0_OUT_MAIN_DIV/1.5, cfg 0x602, ok) and no cold-boot RSC wake (as
+    mainline): fault unchanged.
+  * Remaining difference from mainline: no interconnect (GFX3D->EBI1) bandwidth vote. GX stays powered
+    after the fault. Plan: skip HFI and try stage 4-5 (zap via SCM PAS id 13 into gpu_region 0x97a15000,
+    SQE, ring, CP_ME_INIT, CP_MEM_WRITE 0xcafef00d) like ios-flame's gpu_run; return to the fault later.
 - Earlier plan for stage 3: then gfx_rail_on + sptprac_enable, legacy HFI
   (v1) start, OOB GPU set -> GX GDSC on; then zap shader (TZ PAS, a615_zap), SQE, ring, first commands.
