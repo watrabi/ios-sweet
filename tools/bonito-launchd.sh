@@ -4,7 +4,7 @@
 # Takes effect at the next boot. Needs the file server (USB=2 image).
 #   tools/bonito-launchd.sh [LABEL...]     extra labels to leave out
 # Left out by default:
-#   com.apple.vmd   visual voicemail: with no modem it loops on CoreTelephony errors (30k log lines in 10 s,
+#   com.apple.voicemail.vmd   visual voicemail: with no modem it loops on CoreTelephony errors (30k log lines in 10 s,
 #                   most of a CPU: 384 CPU-seconds in a few minutes)
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -12,7 +12,7 @@ F="python3 tools/bonito-files.py"
 W=work/ssh; mkdir -p $W
 L=/System/Library/xpc/launchd.plist
 [ -s $W/launchd.plist.orig ] || $F get $L.orig $W/launchd.plist.orig
-python3 - "$W/launchd.plist.orig" "$W/launchd.plist.new" com.apple.vmd "$@" <<'PY'
+python3 - "$W/launchd.plist.orig" "$W/launchd.plist.new" com.apple.voicemail.vmd "$@" <<'PY'
 import plistlib, sys
 p = plistlib.load(open(sys.argv[1], 'rb'))
 p['LaunchDaemons']['/System/Library/LaunchDaemons/org.bonito.dropbear.plist'] = {
