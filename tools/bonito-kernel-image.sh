@@ -29,8 +29,8 @@ if [ "$MEM" = wide ]; then flag=--bonito-wide; else flag=--bonito; fi
 # USB=1: report USB state; USB=2: USB Ethernet 192.168.7.2 + file server tcp 2223 (0087)
 # GPU=1: Adreno 615 firmware into /chosen + boot-arg sweetgpu=1 (patch 0086)
 if [ "${GPU:-0}" = 1 ]; then flag="$flag --gpufw research/gpu/fw"; fi
-# METAL=1: GPU buffer pool carved from the top of RAM (256 MB, --gpupool) + boot-arg sweetmtl=2 (0088, SweetMetal2.bundle)
-if [ "${METAL:-0}" = 1 ]; then flag="$flag --gpupool ${GPUPOOL_MB:-256}"; fi
+# METAL=1: GPU buffer pool carved from the top of RAM (512 MB, --gpupool) + boot-arg sweetmtl=2 (0088, SweetMetal2.bundle)
+if [ "${METAL:-0}" = 1 ]; then flag="$flag --gpupool ${GPUPOOL_MB:-512}"; fi
 python3 tools/mkadt.py $O/bonito-$MEM.adt $flag 2>/dev/null
 
 # The iOS root needs these (launchd exec on this macOS-target kernel, rw root, fb); IOS=0 to omit.
