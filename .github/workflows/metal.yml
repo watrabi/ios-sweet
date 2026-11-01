@@ -16,7 +16,8 @@ on:
   push:
     branches: [bonito]
     paths:
-      - "userland/**"
+      - "userland/metal2/**"
+      - "userland/turnip/**"
       - ".github/workflows/metal.yml"
       - "tools/build-turnip-ios.sh"
       - "tools/build-m2v-bridge.sh"
