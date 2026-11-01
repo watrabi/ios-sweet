@@ -111,6 +111,13 @@ Three boots 2026-10-31:
   48 MHz 8-bit -> BSD root ufsroot0 -> `hfs: mounted SweetRoot on device b(1, 0)` -> root not authenticated,
   continuing unsealed -> load_init_program /sbin/launchd -> `*** SWEET userspace: init running as PID 1 ***`
   + heartbeat. Read-only (no ufsrw); write path (CMD24/25) untested.
+- **WRITE PATH WORKS (2026-11-01 ~00:20 UTC)**: shim-boot-0082-emmc-rw.img (+ `ufsrw=1 rootrw=1 ufslogsecs=5`):
+  `"userdata" ... read-write`, `SWEET LOG: console log to the last 4100 KiB of the partition (block 0xe8f3fa)`,
+  HFS mounted rw, init PID 1. Pulled from TWRP with the unchanged `tools/sweet-log-pull.sh` (userdata =
+  /dev/block/mmcblk0p72, 53648801280 bytes): SWEETLOG v1, flush #8, 6555 bytes -> logs/boot-0082-rw.txt.
+  HFS volume afterwards: 3 changed 4K blocks (header + 2 catalog), lastMountedVersion '10.0', unmounted bit
+  clear (hard reset), fsck.hfsplus -n OK. Modify date = 1970 (no RTC; ios-flame 0099 has a PMIC RTC driver).
+- Log workflow from now on: boot -> Power+VolDown -> `fastboot boot` TWRP -> `tools/sweet-log-pull.sh OUT.txt`.
 - hfsprogs: built from AUR in /tmp/hfsprogs, installed by the user with sudo pacman -U.
 - Patch 0083 = ios-flame's iig fix. **macos-15 build works**: run 41255314009 (commit 953e524, macOS 15.8.2,
   Xcode 16.0) success in ~7 min. Its kernel is not hardware-tested yet; then make macos-15 the default runner.
