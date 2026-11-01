@@ -27,6 +27,10 @@ for f in Info.plist _CodeSignature/CodeResources libvulkan_freedreno.dylib Sweet
 	$F put "$B/$f" "$E/$f" $mode
 done
 $F mkdir /var/local 755
+# backboardd and apps are not root: the shader caches (SweetMetal2: /var/local/m2v-cache/<proc>) must be writable
+$F mkdir /var/local/m2v-cache 777
+$F chmod /var/local/m2v-cache 777
+for p in backboardd SpringBoard; do $F mkdir /var/local/m2v-cache/$p 777; $F chmod /var/local/m2v-cache/$p 777; done
 printf '%s\n' "${CLIENTS:-backboardd}" > "${TMPDIR:-/tmp}/mtl2-clients"
 $F put "${TMPDIR:-/tmp}/mtl2-clients" /var/local/mtl2-clients 644
 : > "${TMPDIR:-/tmp}/mtl2.log"
