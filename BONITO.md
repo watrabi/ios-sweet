@@ -319,3 +319,15 @@ Metal, in order:
   - Hang timeout is now 5 s (sweetgpuhang).
 - Still slow. Next levers: DDR/interconnect bandwidth vote (flame 0122, BCM via RPMh), cpufreq + big cores, apps on Metal (mtl2-clients).
 - USB bug: after the cable re-enumerates, the phone's network RX stays dead until reboot.
+
+### Wi-Fi groundwork (2026-11-01/02)
+- **Modem boot.** SDM670's modem is `qcom,pil-q6v55-mss` at 0x4080000. Linux boots it with q6v5_mss and the MBA (mba.mbn) through the RMB registers at 0x4180000, with hyp_assign of the MBA and MPSS memory. This is NOT flame's TrustZone PAS path. Other mss registers: halt_q6 0x1f63000, halt_modem 0x1f65000, halt_nc 0x1f64000, restart 0xc2b0000, pdc_sync 0xb2e0100, alt_reset 0x4180044.
+- **Reserved memory:** modem 0x8b000000 (0x7e00000), MBA 0x93c00000 (2 MB), WLAN MSA 0x93300000 (1 MB). rmtfs is a dynamic 2 MB buffer, client-id 1.
+- **Wi-Fi block:** icnss membase 0x18800000. Apps SMMU stream 0x40 / mask 0x1 (flame: 0x640). Rails: ldoa5 800 mV, ldoa9 1800 mV, ldoa6 1248 mV, ldoa19 3000 mV.
+- **IPC:**
+  - SMEM 0x86000000 (2 MB); IPC register 0x1799000c.
+  - Modem SMP2P: irq-bitmask 0x4000, GIC SPI 451.
+  - GLINK (label "mpss"): irq-mask 0x1000, SPI 449.
+  - AOP QMP: 0xc300000, mask 0x1.
+- Patch 0090 adds /dev/pmem (flame 0094 plus its SMC and RPMh ioctls) for userland bring-up.
+- **@2x and iPhone-XR layouts don't work** with the iPhone X IPSW: PosterBoard aborts, and the XR layout shows only a flickering clock. Stay at @3x.
