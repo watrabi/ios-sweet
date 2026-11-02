@@ -9,6 +9,7 @@ on:
     branches: [bonito]
     paths:
       - "userland/tools/**"
+      - "userland/wifi/**"
       - ".github/workflows/phone-tools.yml"
 
 concurrency:
@@ -101,6 +102,12 @@ jobs:
           set -e
           (cd userland/tools && ./build.sh)
           cp userland/tools/out/* work/stage/
+
+      - name: wland (Wi-Fi, ios-flame phone/wifi with bonito constants)
+        run: |
+          set -e
+          (cd userland/wifi && ./build.sh)
+          cp userland/wifi/out/wland work/stage/
 
       - name: Sign and check
         run: |
