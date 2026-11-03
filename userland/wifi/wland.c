@@ -27,6 +27,7 @@
 #include <signal.h>
 #include <sys/sysctl.h>
 #include <sys/time.h>
+#include "scm.h"
 #include "pmem.h"
 #include "smem.h"
 #include "link.h"
@@ -468,6 +469,31 @@ static void halt_axi(const char *name, uint64_t base)
 	wr32(base + 0, 0);
 }
 
+static uint32_t mba_owners = 1u << VMID_HLOS, mpss_owners = 1u << VMID_HLOS;
+
+/*
+ * Who owns the MBA and MPSS regions survives this process ("boot mba" leaves the MBA with the modem): a run that
+ * wrote into a region the modem owns would take an XPU fault. Kept in a file until the phone reboots.
+ */
+#define OWNERS_FILE	"/var/local/wland-mss-owners"
+static void owners_load(void)
+{
+	FILE *f = fopen(OWNERS_FILE, "r");
+	if (f) {
+		if (fscanf(f, "%x %x", &mba_owners, &mpss_owners) == 2)
+			printf("mss: from a previous run: mba owners %#x, mpss owners %#x\n", mba_owners, mpss_owners);
+		fclose(f);
+	}
+}
+static void owners_save(void)
+{
+	FILE *f = fopen(OWNERS_FILE, "w");
+	if (f) {
+		fprintf(f, "%x %x\n", mba_owners, mpss_owners);
+		fclose(f);
+	}
+}
+
 /* Linux q6v5_xfer_mem_ownership: *perm = bitmask of VMIDs now owning the range. */
 static int mem_owner(const char *what, uint64_t pa, uint64_t size, uint32_t *owners, int local, int remote)
 {
@@ -494,31 +520,6 @@ static int mem_owner(const char *what, uint64_t pa, uint64_t size, uint32_t *own
 		owners_save();
 	}
 	return rc;
-}
-
-static uint32_t mba_owners = 1u << VMID_HLOS, mpss_owners = 1u << VMID_HLOS;
-
-/*
- * Who owns the MBA and MPSS regions survives this process ("boot mba" leaves the MBA with the modem): a run that
- * wrote into a region the modem owns would take an XPU fault. Kept in a file until the phone reboots.
- */
-#define OWNERS_FILE	"/var/local/wland-mss-owners"
-static void owners_load(void)
-{
-	FILE *f = fopen(OWNERS_FILE, "r");
-	if (f) {
-		if (fscanf(f, "%x %x", &mba_owners, &mpss_owners) == 2)
-			printf("mss: from a previous run: mba owners %#x, mpss owners %#x\n", mba_owners, mpss_owners);
-		fclose(f);
-	}
-}
-static void owners_save(void)
-{
-	FILE *f = fopen(OWNERS_FILE, "w");
-	if (f) {
-		fprintf(f, "%x %x\n", mba_owners, mpss_owners);
-		fclose(f);
-	}
 }
 
 /* q6v5_rmb_mba_wait: 0 = any non-zero status; a negative status is an error code from the MBA. */
