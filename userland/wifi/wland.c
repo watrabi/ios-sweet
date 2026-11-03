@@ -553,12 +553,43 @@ static void mss_fail(void)
 }
 
 /*
+ * Pixel "modemsmem" (msm-4.9 drivers/soc/qcom/modemsmem): before the modem boots, Google's kernel fills SMEM item
+ * 134 (SMEM_ID_VENDOR0, struct modem_smem_type, 32 bytes) with the board identity from socinfo; the modem picks its
+ * RF configuration from it. Left zero, bonito's modem dies ~1 s after boot: "[rf]EX:kernel:0:rf:171".
+ * modem_flag comes from ABL's /chosen/cdt/cdb2/modem_flag, which this board does not have (driver default 0).
+ */
+#define SMEM_ID_VENDOR0		134
+#define SMEM_HW_SW_BUILD_ID	137	/* socinfo */
+static int modemsmem_init(void)
+{
+	uint64_t pa, si;
+	uint32_t sz, ssz;
+	if (smem_get(SMEM_HOST_MODEM, SMEM_ID_VENDOR0, &pa, &sz) && smem_alloc(SMEM_HOST_MODEM, SMEM_ID_VENDOR0, 32, &pa)) {
+		fprintf(stderr, "modemsmem: no item %u\n", SMEM_ID_VENDOR0);
+		return -1;
+	}
+	if (smem_get(SMEM_HOST_MODEM, SMEM_HW_SW_BUILD_ID, &si, &ssz) || ssz < 0x44) {
+		fprintf(stderr, "modemsmem: no socinfo\n");
+		return -1;
+	}
+	uint32_t platform = rd32(si + 0x34), pver = rd32(si + 0x38), subtype = rd32(si + 0x40);
+	uint32_t v[8] = { 0, 0, (pver >> 16) & 0xff, pver & 0xff, subtype, platform, 0, 0 };
+	for (unsigned i = 0; i < 8; i++)
+		wr32(pa + 4 * i, v[i]);
+	printf("modemsmem: item %u at %llx: version 0 flag 0 major %u minor %#x subtype %u platform %u\n", SMEM_ID_VENDOR0,
+	       (unsigned long long)pa, v[2], v[3], v[4], v[5]);
+	return 0;
+}
+
+/*
  * Stage 1 ("boot clocks"): load_state, rail votes, clocks, reset release. Stage 2 ("boot mba"): + MBA running.
  * Stage 3 (plain "boot"): + MPSS authenticated and running, SMP2P ready.
  */
 static int boot_modem_stage(int stage)
 {
 	owners_load();
+	if (stage >= 3 && modemsmem_init())
+		return -1;
 	/* 1. q6v5_prepare: the AOP gets load_state before the Q6 runs */
 	if (qmp_send("{class: image, res: load_state, name: modem, val: on}"))
 		return -1;
