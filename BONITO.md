@@ -413,3 +413,17 @@ Metal, in order:
   Reading: the modem runs and waits for the apps side. Differences from `up`: wland boot does not smp2p_create() before
   the modem starts (up does), and no GLINK/QRTR/rmtfs host services. Next: EFS images into /var/local/fw/rmtfs, reboot,
   `wland up 60` (smp2p first, then boot, then net). Logs on the phone: wland-boot-full.log, wland-smp2p.log.
+- **`wland up` run 1 (2026-11-03, EFS images from backup/ in /var/local/fw/rmtfs, sha256 verified; WLAND_NO_RADIO=1):**
+  SMMU WLAN 0x40/0x1 -> CB4 via SMR7; ldoa5/9/6/19 + rfclka2 + QDSS on; MSS boot as before (PBL 1, MBA 2, meta 3,
+  MPSS 4); **SMP2P "modem state 2 ready" after 100 ms** (smp2p_create before boot: that was the missing piece);
+  GLINK v1 up, channels glink_ssr / IPCRTR / SSM_RTR_MODEM_APPS / apr_*; QRTR; **rmtfs served modem_fs1/fs2/fsg/fsc
+  reads** (fsg_oem_1/2 not present, as on Linux); pd-mapper + TFTP (/readwrite/server_check.txt written); ~20 QMI
+  services registered. **At 946 ms: modem ERR-FATAL**, SMEM 421 = "0:[rf]EX:kernel:0:rf:171:PC=d949b6d4". No WLFW (0x45) yet.
+- Cause candidate: Pixel **modemsmem** (dtbo node "modemsmem", msm-4.9 drivers/soc/qcom/modemsmem): Google's kernel
+  writes struct modem_smem_type {version, modem_flag, major_id, minor_id, subtype, platform, efs_magic, ftm_magic} to
+  SMEM 134 (SMEM_ID_VENDOR0) before modem boot; on bonito item 134 exists (32 B) but was all zero. socinfo (item 137):
+  id 0x150, hw_platform 5, platform_version 0x00030028, subtype 3 -> major 3, minor 0x28. modem_flag comes from ABL's
+  /chosen/cdt/cdb2/modem_flag; that name is absent here (none of the cdb2 name slots fits it) -> 0, the driver default.
+  wland ef84700 fills item 134 at the start of the stage-3 boot.
+- ABL's live DTB stays intact at 0x84500000 (0x6de17 B) during iOS; /dev/pmem reads stop at 0x84560000, so the strings
+  table is out of reach. dtb/bonito-live.dtb (partial, gitignored: it holds device identifiers - serial, MACs, IMEIs).
