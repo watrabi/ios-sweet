@@ -405,3 +405,11 @@ Metal, in order:
 - Open: rmtfs needs the EFS partition images (modemst1, modemst2, fsg, fsc) in /var/local/fw/rmtfs. They are the
   2026-10-31 backups (backup/ on the old PC + "watr.lol Drive"), not on this host. `wland boot` alone does not start
   rmtfs (only up/auto do).
+- **Stage 3: MPSS AUTHENTICATED AND RUNNING (2026-11-03, after a clean reboot):** `wland boot`: MBA again status 2;
+  metadata 8476 B at a7838000 (pm_alloc) -> **status 3**; 158194741 B of segments; **MPSS auth status 4 (complete)**;
+  all hyp_assigns rc 0. Then **no SMP2P ready in 30 s**: inbound item 435 has the $SMP header (pids 1->0) but 0/16 entries.
+  SMEM part 2 went from empty to items 435, 605 (= 1), 478 (GLINK descriptor, all zero), 480 (modem rx fifo); no 421
+  (no SSR crash reason). `wland smp2p-init` afterwards (outbound 428 "master-kernel", kick bit 14): still 0 inbound entries.
+  Reading: the modem runs and waits for the apps side. Differences from `up`: wland boot does not smp2p_create() before
+  the modem starts (up does), and no GLINK/QRTR/rmtfs host services. Next: EFS images into /var/local/fw/rmtfs, reboot,
+  `wland up 60` (smp2p first, then boot, then net). Logs on the phone: wland-boot-full.log, wland-smp2p.log.
