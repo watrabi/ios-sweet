@@ -331,3 +331,21 @@ Metal, in order:
   - AOP QMP: 0xc300000, mask 0x1.
 - Patch 0090 adds /dev/pmem (flame 0094 plus its SMC and RPMh ioctls) for userland bring-up.
 - **@2x and iPhone-XR layouts don't work** with the iPhone X IPSW: PosterBoard aborts, and the XR layout shows only a flickering clock. Stay at @3x.
+
+### New host: ChromeOS Crostini (Debian 13 VM), 2026-11-03
+- Earlier artifacts (/mnt/iosbuild, xnu/out-*, research/, dtb/, work/ssh) stayed on the old Arch PC. Rebuilt here:
+  kernel 0090 from CI run 41345791602 (d371bcd) in xnu/out-0090; research/ipsw-x/d22ap.adt via remotezip from the
+  20H392 IPSW; GPU firmware (research/gpu/fw) and dtb/bonito-stock.dtb from the SP2A.220505.008 factory zip
+  (image zip -> vendor.img -> simg2img -> debugfs dump /firmware/a6*; boot.img -> unpack_bootv2.py). Same sizes as before.
+- Big files on the shared SD card: /mnt/chromeos/shared/removable/Scratchpad (factory/, twrp/, boot/).
+- **GitHub Actions: free minutes exhausted** (dispatch -> HTTP 422 "Actions has been disabled"). The wland push never
+  built (no phone-tools run after 2026-11-01 16:33). Builds move to a self-hosted macOS 15 + Xcode 16.0 VM.
+- **0090 boots iOS to the lock screen** (shim-boot-0090-metal.img: emmc root, touch, keys, 6 CPUs, GPU, Metal, USB=2);
+  /dev/pmem present.
+- Crostini's kernel has no usbnet/cdc_ether, and ChromeOS's own cdc_ether claims a CDC ECM device so it can't be
+  shared with Linux. Fix: `tools/usb-vendor-class.py KIN KOUT` patches 5 descriptor bytes in a built kernel to class
+  0xff (wire protocol unchanged), and `sudo tools/ecm-tap.py` is a pyusb CDC-ECM host bridging to TAP sweet0
+  (192.168.7.1). Boot shim-boot-0090v-metal.img -> share 1209:0001 with Linux -> ping 192.168.7.2 OK (5-10 ms),
+  bonito-files.py list OK.
+- TWRP 3.7.1_12-1 (sha256 e0781b59...) hung at the Google logo once on this host (not needed so far).
+- SSH: dropbear port 22 refused on this boot; the old work/ssh key is on the old PC.
