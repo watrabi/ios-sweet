@@ -398,3 +398,10 @@ Metal, in order:
   cx.lvl[7] mx.lvl[4] mss.lvl[8] rc 0; CBCRs iface/snoc_axi/bus/mnoc_axi = 00000001, boot_rom 00004220, prng 00000000
   (all CLK_OFF clear); alt reset done (pdc 0); RMB readable, no bus hang: all zero except MBA_MSS_STATUS (0x40) = 0x0000000c.
   Phone unaffected. Log on the phone: /var/local/wland-boot-clocks.log.
+- **Stage 2 OK: MBA RUNS ON THE MODEM (2026-11-03):** `wland boot mba`: mba.mbn (238304 B) at 0x95600000;
+  hyp_assign MPSS 8b000000+9800000 and MBA 95600000+200000 HLOS -> MSS_MSA both rc 0; boot FSM done;
+  **PBL status 1 (success), MBA status 2 (XPU unlocked, scribbled)**. Phone unaffected. Owners file now 8000 8000.
+  Log: /var/local/wland-boot-mba.log.
+- Open: rmtfs needs the EFS partition images (modemst1, modemst2, fsg, fsc) in /var/local/fw/rmtfs. They are the
+  2026-10-31 backups (backup/ on the old PC + "watr.lol Drive"), not on this host. `wland boot` alone does not start
+  rmtfs (only up/auto do).
