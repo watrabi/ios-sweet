@@ -348,4 +348,5 @@ Metal, in order:
   (192.168.7.1). Boot shim-boot-0090v-metal.img -> share 1209:0001 with Linux -> ping 192.168.7.2 OK (5-10 ms),
   bonito-files.py list OK.
 - TWRP 3.7.1_12-1 (sha256 e0781b59...) hung at the Google logo once on this host (not needed so far).
-- SSH: dropbear port 22 refused on this boot; the old work/ssh key is on the old PC.
+- SSH: new key work/ssh/id_ed25519 (this host) appended to the phone's authorized_keys (old key kept). dropbear comes up
+  late (port 22 refused for the first ~20 min after boot, then `tools/bonito-ssh` works). /dev/pmem = crw------- 19,0.
