@@ -373,4 +373,4 @@ Metal, in order:
   462 MB in use (fragmentation). Turnip then returned DeviceLost for every command buffer; backboardd kept
   alternating its last two frames. No GPU hang. Log: logs/boot-0090v-shortcuts.txt (from the userdata log ring read
   through /dev/rufsroot0 with `bonito-files.py read`; no TWRP needed).
-- Mitigation: GPUPOOL_MB=1024. Real fixes: allocator fragmentation; map allocation failure to OOM, not DeviceLost.
+- Mitigation: GPUPOOL_MB=1024 (shim-boot-0090v-metal-pool1g.img): user opened every app, no freeze. Real fixes: allocator fragmentation; map allocation failure to OOM, not DeviceLost.
