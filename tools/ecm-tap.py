@@ -51,8 +51,10 @@ def main():
         try:
             run(dev, tap)
         except usb.core.USBError as e:
-            print(f'USB gone ({e}); waiting for the phone again')
-            usb.util.dispose_resources(dev)
+            print(f'USB gone ({e}); waiting for the phone again', flush=True)
+            with LOCK:
+                CUR[0] = None
+                usb.util.dispose_resources(dev)
             time.sleep(1)
 
 
@@ -75,7 +77,7 @@ def run(dev, tap):
         dev.ctrl_transfer(0x21, 0x43, 0x000e, 0, b'')
     except usb.core.USBError:
         pass
-    print('phone connected: 192.168.7.2')
+    print('phone connected: 192.168.7.2', flush=True)
     CUR[0] = dev
     try:
         while True:
@@ -86,25 +88,28 @@ def run(dev, tap):
             if len(frame):
                 os.write(tap, bytes(frame))
     finally:
-        CUR[0] = None
+        with LOCK:
+            CUR[0] = None
 
 
 CUR = [None]                                    # the connected phone, or None
+LOCK = threading.Lock()                         # libusb segfaults if a handle is freed mid-write
 
 
 def tap_to_usb(tap):
     """One reader for the TAP for the whole run (frames are dropped while no phone is attached)."""
     while True:
         frame = os.read(tap, FRAME_MAX)
-        dev = CUR[0]
-        if dev is None:
-            continue
-        try:
-            dev.write(EP_OUT, frame, timeout=2000)
-            if len(frame) % 512 == 0:
-                dev.write(EP_OUT, b'', timeout=2000)     # end the transfer with a ZLP
-        except usb.core.USBError:
-            pass                                # timeout or unplug; the reader loop notices
+        with LOCK:
+            dev = CUR[0]
+            if dev is None:
+                continue
+            try:
+                dev.write(EP_OUT, frame, timeout=2000)
+                if len(frame) % 512 == 0:
+                    dev.write(EP_OUT, b'', timeout=2000)     # end the transfer with a ZLP
+            except usb.core.USBError:
+                pass                            # timeout or unplug; the reader loop notices
 
 if __name__ == '__main__':
     try:
