@@ -350,3 +350,27 @@ Metal, in order:
 - TWRP 3.7.1_12-1 (sha256 e0781b59...) hung at the Google logo once on this host (not needed so far).
 - SSH: new key work/ssh/id_ed25519 (this host) appended to the phone's authorized_keys (old key kept). dropbear comes up
   late (port 22 refused for the first ~20 min after boot, then `tools/bonito-ssh` works). /dev/pmem = crw------- 19,0.
+
+### Wi-Fi step 1: wland on the phone (2026-11-03)
+- Builds now run on a self-hosted macOS 15.8.2 (x86_64) VM with Xcode 16.0 (16A242d, iPhoneOS 18.0 SDK):
+  `IOSCC=.../ios-cc userland/wifi/build.sh` -> wland 230592 B, sha256 d9edb80f...85db, no warnings.
+  (VM keyboard: shifted characters arrive mangled; type only lowercase there, e.g. `sh script.sh`.)
+- Boot shim-boot-0090v-metal-pool1g.img (1 GB GPU pool at 0x13e2c0000, see the Shortcuts note below), wland in
+  /var/local/bin. SSH came up ~20 s after the file server this time.
+- `wland smem`: SMEM readable via /dev/pmem: 4 partitions + global; part 0 hosts 0-2 @861cf000+30000,
+  part 1 hosts 0-5 @861af000+20000, **part 2 hosts 0-1 (apps<->modem) @8611d000+7c000 empty**, part 3
+  @86001000+fc000; item 137 @86007210+220. (Modem not running, as expected.)
+- `wland pas-probe` (SCM 0x42000207 PAS_IS_SUPPORTED): **modem (4) -> x0 0xffcfffc0, x1 0** (error);
+  **zap (13, control) -> x0 0, x1 0**. TZ refuses PAS for the modem while the zap id answers normally.
+  Consistent with mainline sdm670 using qcom,sdm670-mss-pil (q6v5_mss: MBA via RMB 0x4180000, hyp_assign of
+  MBA/MPSS memory) rather than PAS. Guess, not proven: x1 0 for the zap too, so x1 is not a reliable "supported" flag here.
+- Next: MSS boot in wland (port the q6v5_mss sequence: clocks/resets/halts listed above, MBA load + RMB handshake,
+  mpss .mdt segments, then SMP2P/GLINK). Firmware (mba.mbn, modem.mdt/.bNN) is on the radio image's modem
+  partition (factory zip radio-bonito-g670-00145-220106-b-8048689.img) or the phone's /vendor/firmware_mnt.
+
+### GPU pool exhaustion (Shortcuts, 2026-11-03)
+- 512 MB pool: `pool: no 11370496 bytes free (488 MB in use)` (one 1125x2436 BGRA framebuffer), repeated even at
+  462 MB in use (fragmentation). Turnip then returned DeviceLost for every command buffer; backboardd kept
+  alternating its last two frames. No GPU hang. Log: logs/boot-0090v-shortcuts.txt (from the userdata log ring read
+  through /dev/rufsroot0 with `bonito-files.py read`; no TWRP needed).
+- Mitigation: GPUPOOL_MB=1024. Real fixes: allocator fragmentation; map allocation failure to OOM, not DeviceLost.
