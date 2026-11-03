@@ -31,10 +31,10 @@
 #define FW_INIT_DONE_IND 0x38
 
 #define CLIENT_ID	0x4b4e454c	/* ath10k's */
-#define MSA_PA		0x93300000ull	/* bonito wlan_msa_region (sdm670) */
+#define MSA_PA		0x94d00000ull	/* bonito live wlan_msa_region (after the dtbo; boot.img DT says 0x93300000) */
 #define MSA_SIZE	0x100000u	/* qcom,wlan-msa-memory */
-#define BDF_PATH	"/var/local/fw/modem/bdwlan-flame.bin"
-#define BDF_PATH2	"/var/local/fw/modem/bdwlan-flame-PROTO1.1.bin"
+#define BDF_PATH	"/var/local/fw/modem/bdwlan-bonito.bin"
+#define BDF_PATH2	"/var/local/fw/modem/bdwlan-bonito-USA.bin"
 
 static uint32_t srv_node, srv_port;
 static int srv_up, started;

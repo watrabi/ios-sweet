@@ -353,13 +353,41 @@ static int qmp_send(const char *msg)
 	return rc;
 }
 
-/* ---- modem boot: TrustZone PAS (Linux qcom_q6v5_pas + qcom_mdt_loader) ---- */
-
+/* ---- modem boot: MBA self-authentication (Linux qcom_q6v5_mss, MSS_SDM845 / downstream qcom,qdsp6v65-1-0) ----
+ * bonito's TZ refuses PAS for the modem (wland pas-probe: PAS_IS_SUPPORTED(4) -> 0xffcfffc0) and the stock DT says
+ * qcom,pil-self-auth: the Q6 boots the MBA, which authenticates the MPSS image via the RMB registers.
+ * Addresses: stock DT qcom,mss@4080000 and the live (dtbo) reserved-memory that ABL hands over.
+ */
 #define PAS_MODEM	4
-#define MPSS_PA		0x8b000000ull	/* bonito modem_region (sdm670) */
-#define MPSS_SIZE	0x07e00000ull
+#define MPSS_PA		0x8b000000ull	/* live modem_region; modem.mdt spans exactly 0x8b000000..0x94800000 */
+#define MPSS_SIZE	0x09800000ull
+#define MBA_PA		0x95600000ull	/* live mba_region */
+#define MBA_SIZE	0x00200000ull
 #define FW_DIR		"/var/local/fw/modem"
 #define SCM_PIL(cmd)	(0x42000000ull | (2u << 8) | (cmd))
+
+#define QDSP6SS		0x04080000ull	/* qdsp6_base */
+#define  Q6_SLEEP		0x03c
+#define  Q6_BOOT_CORE_START	0x400
+#define  Q6_BOOT_CMD		0x404
+#define RMB		0x04180000ull	/* rmb_base */
+#define  RMB_MBA_IMAGE		0x00
+#define  RMB_PBL_STATUS		0x04
+#define  RMB_MBA_COMMAND	0x08
+#define  RMB_MBA_STATUS		0x0c
+#define  RMB_PMI_META_DATA	0x10
+#define  RMB_PMI_CODE_START	0x14
+#define  RMB_PMI_CODE_LENGTH	0x18
+#define  RMB_MBA_MSS_STATUS	0x40
+#define  RMB_MBA_ALT_RESET	0x44
+#define HALT_Q6		0x01f63000ull
+#define HALT_MODEM	0x01f65000ull
+#define HALT_NC		0x01f64000ull
+#define AOSS_MSS_RESTART 0x0c2b0000ull	/* aoss_cc 0xc2a0000 + 0x10000 */
+#define PDC_SYNC_RESET	0x0b2e0100ull	/* pdc_reset + 0x100, bit qcom,mss_pdc_offset = 9 */
+#define PDC_MODEM_BIT	(1u << 9)
+#define GCC		0x00100000ull
+#define  GCC_VOTE		0x52004	/* APCS clock branch ena vote */
 
 static int64_t scm(uint32_t cmd, uint64_t arginfo, uint64_t a, uint64_t b, uint64_t c, uint64_t *r1)
 {
@@ -389,29 +417,235 @@ static uint8_t *slurp(const char *path, size_t *len)
 
 struct phdr { uint32_t type, offset, vaddr, paddr, filesz, memsz, flags, align; };
 
-static int boot_modem(void)
+static void sleep_us(unsigned us)
 {
-	/* 1. proxy votes as downstream (vdd_cx/vdd_mss >= 385): the top levels */
-	int ncx = levels("cx.lvl", 0), nmss = levels("mss.lvl", 0);
-	uint64_t aux;
-	uint32_t len, top_cx = 0, top_mss = 0;
-	if (!cmddb_aux("cx.lvl", &aux, &len))
-		for (uint32_t i = 0; i < len / 2; i++)
-			if (aux16(aux, i))
-				top_cx = i;
-	if (!cmddb_aux("mss.lvl", &aux, &len))
-		for (uint32_t i = 0; i < len / 2; i++)
-			if (aux16(aux, i))
-				top_mss = i;
-	printf("boot: cx %d levels, mss %d levels: voting cx[%u] mss[%u]\n", ncx, nmss, top_cx, top_mss);
-	if (vote("cx.lvl", top_cx) || vote("mss.lvl", top_mss))
+	usleep(us);
+}
+
+/* A GCC branch clock: enable bit 0, wait for CLK_OFF (bit 31) to clear unless it is a voted branch. */
+static int gcc_branch(const char *name, uint32_t off, int check)
+{
+	wr32(GCC + off, rd32(GCC + off) | 1);
+	int rc = check ? wait_bit(GCC + off, 1u << 31, 0, 10) : 0;
+	printf("mss: clk %-10s cbcr %05x = %08x%s\n", name, off, rd32(GCC + off), rc ? "  STILL OFF" : "");
+	return rc;
+}
+
+/* A clock enabled through the APCS vote register; halt register only to report. */
+static void gcc_vote(const char *name, unsigned bit, uint32_t halt)
+{
+	wr32(GCC + GCC_VOTE, rd32(GCC + GCC_VOTE) | (1u << bit));
+	sleep_us(10);
+	if (halt)
+		printf("mss: clk %-10s vote bit %2u, cbcr %05x = %08x\n", name, bit, halt, rd32(GCC + halt));
+	else
+		printf("mss: clk %-10s vote bit %2u\n", name, bit);
+}
+
+/* Linux q6v5_reset_deassert with has_alt_reset: PDC sync reset held around an AOSS MSS restart pulse. */
+static void mss_reset_deassert(void)
+{
+	wr32(PDC_SYNC_RESET, rd32(PDC_SYNC_RESET) | PDC_MODEM_BIT);
+	wr32(RMB + RMB_MBA_ALT_RESET, 1);
+	wr32(AOSS_MSS_RESTART, 1);
+	sleep_us(300);
+	wr32(AOSS_MSS_RESTART, 0);
+	sleep_us(300);
+	wr32(RMB + RMB_MBA_ALT_RESET, 0);
+	wr32(PDC_SYNC_RESET, rd32(PDC_SYNC_RESET) & ~PDC_MODEM_BIT);
+	printf("mss: reset deasserted (alt reset), pdc %08x\n", rd32(PDC_SYNC_RESET));
+}
+
+static void halt_axi(const char *name, uint64_t base)
+{
+	if (rd32(base + 8)) {			/* AXI_IDLE */
+		printf("mss: halt %s: already idle\n", name);
+		return;
+	}
+	wr32(base + 0, 1);			/* AXI_HALTREQ */
+	int rc = wait_bit(base + 4, 1, 1, 100);	/* AXI_HALTACK */
+	printf("mss: halt %s: ack %s, idle %u\n", name, rc ? "TIMEOUT" : "ok", rd32(base + 8));
+	wr32(base + 0, 0);
+}
+
+/* Linux q6v5_xfer_mem_ownership: *perm = bitmask of VMIDs now owning the range. */
+static int mem_owner(const char *what, uint64_t pa, uint64_t size, uint32_t *owners, int local, int remote)
+{
+	if (local == !!(*owners & (1u << VMID_HLOS)) && remote == !!(*owners & (1u << VMID_MSS_MSA)))
+		return 0;
+	uint32_t src[2], dst[2], perm[2];
+	int ns = 0, nd = 0;
+	if (*owners & (1u << VMID_HLOS))
+		src[ns++] = VMID_HLOS;
+	if (*owners & (1u << VMID_MSS_MSA))
+		src[ns++] = VMID_MSS_MSA;
+	if (local) {
+		dst[nd] = VMID_HLOS;
+		perm[nd++] = PERM_RWX;
+	}
+	if (remote) {
+		dst[nd] = VMID_MSS_MSA;
+		perm[nd++] = PERM_RW;
+	}
+	int rc = hyp_assign_perm(pa, (size + 0xfff) & ~0xfffull, src, ns, dst, perm, nd);
+	printf("mss: %s -> %s%s: %s\n", what, local ? "apps " : "", remote ? "modem" : "", rc ? "FAILED" : "ok");
+	if (!rc) {
+		*owners = (local ? 1u << VMID_HLOS : 0) | (remote ? 1u << VMID_MSS_MSA : 0);
+		owners_save();
+	}
+	return rc;
+}
+
+static uint32_t mba_owners = 1u << VMID_HLOS, mpss_owners = 1u << VMID_HLOS;
+
+/*
+ * Who owns the MBA and MPSS regions survives this process ("boot mba" leaves the MBA with the modem): a run that
+ * wrote into a region the modem owns would take an XPU fault. Kept in a file until the phone reboots.
+ */
+#define OWNERS_FILE	"/var/local/wland-mss-owners"
+static void owners_load(void)
+{
+	FILE *f = fopen(OWNERS_FILE, "r");
+	if (f) {
+		if (fscanf(f, "%x %x", &mba_owners, &mpss_owners) == 2)
+			printf("mss: from a previous run: mba owners %#x, mpss owners %#x\n", mba_owners, mpss_owners);
+		fclose(f);
+	}
+}
+static void owners_save(void)
+{
+	FILE *f = fopen(OWNERS_FILE, "w");
+	if (f) {
+		fprintf(f, "%x %x\n", mba_owners, mpss_owners);
+		fclose(f);
+	}
+}
+
+/* q6v5_rmb_mba_wait: 0 = any non-zero status; a negative status is an error code from the MBA. */
+static int32_t rmb_wait(uint32_t want, unsigned ms)
+{
+	int32_t v = 0;
+	for (unsigned i = 0; i <= ms; i++) {
+		v = (int32_t)rd32(RMB + RMB_MBA_STATUS);
+		if (v < 0 || (!want && v) || (want && (uint32_t)v == want))
+			return v;
+		delay_ms(1);
+	}
+	return v ? v : -110;			/* -ETIMEDOUT */
+}
+
+static void rmb_show(const char *when)
+{
+	printf("mss: rmb %s: image %08x pbl %08x cmd %08x mba %08x meta %08x start %08x len %08x mss %08x\n", when,
+	       rd32(RMB + RMB_MBA_IMAGE), rd32(RMB + RMB_PBL_STATUS), rd32(RMB + RMB_MBA_COMMAND), rd32(RMB + RMB_MBA_STATUS),
+	       rd32(RMB + RMB_PMI_META_DATA), rd32(RMB + RMB_PMI_CODE_START), rd32(RMB + RMB_PMI_CODE_LENGTH),
+	       rd32(RMB + RMB_MBA_MSS_STATUS));
+}
+
+static void mss_fail(void)
+{
+	rmb_show("at failure");
+	halt_axi("q6", HALT_Q6);
+	halt_axi("modem", HALT_MODEM);
+	halt_axi("nc", HALT_NC);
+	mem_owner("mba", MBA_PA, MBA_SIZE, &mba_owners, 1, 0);
+}
+
+/*
+ * Stage 1 ("boot clocks"): load_state, rail votes, clocks, reset release. Stage 2 ("boot mba"): + MBA running.
+ * Stage 3 (plain "boot"): + MPSS authenticated and running, SMP2P ready.
+ */
+static int boot_modem_stage(int stage)
+{
+	owners_load();
+	/* 1. q6v5_prepare: the AOP gets load_state before the Q6 runs */
+	if (qmp_send("{class: image, res: load_state, name: modem, val: on}"))
 		return -1;
 
-	/* 2. metadata: ELF header + program headers + hash segment */
+	/* 2. proxy power domains cx, mx, mss: the top levels (downstream votes vdd >= 385 on all three) */
+	static const char *const rails[] = { "cx.lvl", "mx.lvl", "mss.lvl" };
+	for (unsigned r = 0; r < 3; r++) {
+		uint64_t aux;
+		uint32_t len, top = 0;
+		if (cmddb_aux(rails[r], &aux, &len)) {
+			fprintf(stderr, "mss: %s not in cmd-db\n", rails[r]);
+			return -1;
+		}
+		for (uint32_t i = 0; i < len / 2; i++)
+			if (aux16(aux, i))
+				top = i;
+		if (vote(rails[r], top))
+			return -1;
+	}
+
+	/* 3. proxy clocks (xo is the always-on CXO here), reset clocks, reset release, active clocks */
+	gcc_vote("prng", 13, 0x34004);
+	if (gcc_branch("iface", 0x8a000, 1) | gcc_branch("snoc_axi", 0x8a150, 1))
+		return -1;
+	mss_reset_deassert();
+	gcc_branch("bus", 0x8a154, 0);		/* BRANCH_VOTED: no halt check */
+	gcc_vote("mem", 10, 0x38004);
+	gcc_vote("gpll0_mss", 17, 0);
+	gcc_branch("mnoc_axi", 0x8a004, 0);	/* BRANCH_VOTED */
+	rmb_show("after clocks");
+	if (stage <= 1)
+		return 0;
+
+	/* 4. MBA into its region (q6v5_load), then both regions to the modem's VM */
+	size_t mba_len;
+	uint8_t *mba = slurp(FW_DIR "/mba.mbn", &mba_len);
+	if (!mba || mba_len > 0x100000) {
+		fprintf(stderr, "mss: %s/mba.mbn missing or over 1 MB\n", FW_DIR);
+		return -1;
+	}
+	if (mem_owner("mba", MBA_PA, MBA_SIZE, &mba_owners, 1, 0))	/* a previous run may have left it assigned */
+		return -1;
+	pm_wr(MBA_PA, mba, (mba_len + 3) & ~(size_t)3);
+	free(mba);
+	printf("mss: mba.mbn (%zu bytes) at %llx\n", mba_len, MBA_PA);
+	if (mem_owner("mpss", MPSS_PA, MPSS_SIZE, &mpss_owners, 0, 1) ||
+	    mem_owner("mba", MBA_PA, MBA_SIZE, &mba_owners, 0, 1))
+		return -1;
+	wr32(RMB + RMB_MBA_IMAGE, (uint32_t)MBA_PA);
+
+	/* 5. q6v5proc_reset, MSS_SDM845: sleep clock, core start, boot FSM, PBL */
+	wr32(QDSP6SS + Q6_SLEEP, rd32(QDSP6SS + Q6_SLEEP) | 1);
+	if (wait_bit(QDSP6SS + Q6_SLEEP, 1u << 31, 0, 1)) {
+		printf("mss: QDSP6SS sleep clock stays off (%08x)\n", rd32(QDSP6SS + Q6_SLEEP));
+		mss_fail();
+		return -1;
+	}
+	wr32(QDSP6SS + Q6_BOOT_CORE_START, 1);
+	wr32(QDSP6SS + Q6_BOOT_CMD, 1);
+	if (wait_bit(RMB + RMB_MBA_MSS_STATUS, 1, 1, 10)) {
+		printf("mss: boot FSM did not complete\n");
+		mss_reset_deassert();
+		mss_fail();
+		return -1;
+	}
+	uint32_t pbl = 0;
+	for (int t = 0; t <= 1000 && !(pbl = rd32(RMB + RMB_PBL_STATUS)); t++)
+		delay_ms(1);
+	printf("mss: PBL status %u%s\n", pbl, pbl == 1 ? " (success)" : "");
+	if (pbl != 1) {
+		mss_fail();
+		return -1;
+	}
+	int32_t st = rmb_wait(0, 5000);
+	printf("mss: MBA status %d%s\n", st, st == 1 || st == 2 ? " (XPU unlocked: MBA running)" : "");
+	if (st != 1 && st != 2) {
+		mss_fail();
+		return -1;
+	}
+	if (stage <= 2)
+		return 0;
+
+	/* 6. MPSS metadata (ELF header + program headers + hash segment) authenticated by the MBA */
 	size_t mlen;
 	uint8_t *mdt = slurp(FW_DIR "/modem.mdt", &mlen);
 	if (!mdt) {
-		fprintf(stderr, "boot: no %s/modem.mdt\n", FW_DIR);
+		fprintf(stderr, "mss: no %s/modem.mdt\n", FW_DIR);
+		mss_fail();
 		return -1;
 	}
 	uint32_t phoff, phnum = 0;
@@ -423,7 +657,8 @@ static int boot_modem(void)
 		if (((ph[i].flags >> 24) & 7) == 2)
 			hash = (int)i;
 	if (hash < 0) {
-		fprintf(stderr, "boot: no hash segment\n");
+		fprintf(stderr, "mss: no hash segment\n");
+		mss_fail();
 		return -1;
 	}
 	size_t ehsz = phoff + 32ull * phnum, meta_len = ehsz + ph[hash].filesz;
@@ -437,36 +672,60 @@ static int boot_modem(void)
 		snprintf(path, sizeof(path), FW_DIR "/modem.b%02d", hash);
 		uint8_t *h = slurp(path, &hl);
 		if (!h || hl < ph[hash].filesz) {
-			fprintf(stderr, "boot: hash segment %s missing\n", path);
+			fprintf(stderr, "mss: hash segment %s missing\n", path);
+			mss_fail();
 			return -1;
 		}
 		memcpy(meta + ehsz, h, ph[hash].filesz);
 		free(h);
 	}
 	uint64_t meta_pa = pm_alloc(meta_len, 0x1000);
-	if (!meta_pa)
+	if (!meta_pa) {
+		mss_fail();
 		return -1;
-	pm_wr(meta_pa, meta, meta_len);
-	uint64_t r1 = 0;
-	int64_t rc = scm(1, 2 | (2u << 6), PAS_MODEM, meta_pa, 0, &r1);
-	printf("boot: init image (%zu bytes metadata at %llx) -> %lld/%llx\n", meta_len, (unsigned long long)meta_pa,
-	       (long long)rc, (unsigned long long)r1);
-	if (rc || r1)
+	}
+	pm_wr(meta_pa, meta, (meta_len + 3) & ~(size_t)3);
+	free(meta);
+	uint32_t meta_owners = 1u << VMID_HLOS;
+	wr32(RMB + RMB_PMI_CODE_LENGTH, 0);
+	if (mem_owner("metadata", meta_pa, meta_len, &meta_owners, 0, 1)) {
+		mss_fail();
 		return -1;
+	}
+	wr32(RMB + RMB_PMI_META_DATA, (uint32_t)meta_pa);
+	wr32(RMB + RMB_MBA_COMMAND, 1);			/* RMB_CMD_META_DATA_READY */
+	st = rmb_wait(3, 1000);
+	printf("mss: metadata (%zu bytes at %llx) -> status %d%s\n", meta_len, (unsigned long long)meta_pa, st,
+	       st == 3 ? " (authenticated)" : "");
+	int back = mem_owner("metadata", meta_pa, meta_len, &meta_owners, 1, 0);
+	if (!back)
+		pm_free(meta_pa);			/* never free memory the modem still owns */
+	if (st != 3) {
+		mss_fail();
+		return -1;
+	}
 
-	/* 3. memory setup for the relocatable image, then the segments at their addresses */
-	rc = scm(2, 3, PAS_MODEM, MPSS_PA, MPSS_SIZE, &r1);
-	printf("boot: mem setup %llx+%llx -> %lld/%llx\n", MPSS_PA, MPSS_SIZE, (long long)rc, (unsigned long long)r1);
-	if (rc || r1)
+	/* 7. segments: MPSS back to apps, shared during the copy; RMB told the code start once, then the length so far */
+	uint64_t lo = ~0ull;
+	for (uint32_t i = 0; i < phnum; i++)
+		if (ph[i].type == 1 && (int)i != hash && ph[i].memsz && ph[i].paddr < lo)
+			lo = ph[i].paddr;
+	if (lo != MPSS_PA)
+		printf("mss: image starts at %llx, region at %llx (relocated)\n", (unsigned long long)lo, MPSS_PA);
+	mem_owner("mpss", MPSS_PA, MPSS_SIZE, &mpss_owners, 1, 0);
+	if (mem_owner("mpss", MPSS_PA, MPSS_SIZE, &mpss_owners, 1, 1)) {
+		mss_fail();
 		return -1;
-	uint64_t total = 0;
+	}
 	static uint8_t zeros[0x10000];
+	uint64_t total = 0;
 	for (uint32_t i = 0; i < phnum; i++) {
 		if (ph[i].type != 1 || (int)i == hash || !ph[i].memsz)
 			continue;
-		uint64_t pa = ph[i].paddr;
-		if (pa < MPSS_PA || pa + ph[i].memsz > MPSS_PA + MPSS_SIZE) {
-			fprintf(stderr, "boot: segment %u at %llx outside the region\n", i, (unsigned long long)pa);
+		uint64_t off = ph[i].paddr - lo, pa = MPSS_PA + off;
+		if (off + ph[i].memsz > MPSS_SIZE || ph[i].filesz > ph[i].memsz) {
+			fprintf(stderr, "mss: segment %u outside the region or filesz > memsz\n", i);
+			mss_fail();
 			return -1;
 		}
 		if (ph[i].filesz) {
@@ -474,47 +733,70 @@ static int boot_modem(void)
 			size_t sl;
 			snprintf(path, sizeof(path), FW_DIR "/modem.b%02u", i);
 			uint8_t *seg = slurp(path, &sl);
-			if (!seg || sl < ph[i].filesz) {
-				fprintf(stderr, "boot: %s missing or short\n", path);
+			if (!seg || sl != ph[i].filesz) {
+				fprintf(stderr, "mss: %s missing or wrong size\n", path);
+				free(seg);
+				mss_fail();
 				return -1;
 			}
 			pm_wr(pa, seg, (ph[i].filesz + 3) & ~3u);
 			free(seg);
-			total += ph[i].filesz;
 		}
 		for (uint64_t o = (ph[i].filesz + 3) & ~3ull; o < ph[i].memsz; o += sizeof(zeros)) {
 			uint64_t n = ph[i].memsz - o < sizeof(zeros) ? ph[i].memsz - o : sizeof(zeros);
 			pm_wr(pa + o, zeros, (n + 3) & ~3ull);
 		}
+		total += ph[i].memsz;
+		if (!rd32(RMB + RMB_PMI_CODE_LENGTH)) {
+			wr32(RMB + RMB_PMI_CODE_START, (uint32_t)MPSS_PA);	/* relocatable: the region start */
+			wr32(RMB + RMB_MBA_COMMAND, 2);				/* RMB_CMD_LOAD_READY */
+		}
+		wr32(RMB + RMB_PMI_CODE_LENGTH, (uint32_t)total);
+		st = (int32_t)rd32(RMB + RMB_MBA_STATUS);
+		if (st < 0) {
+			printf("mss: segment %u: MPSS authentication failed: %d\n", i, st);
+			mss_fail();
+			return -1;
+		}
 	}
-	printf("boot: %llu bytes of segments loaded\n", (unsigned long long)total);
+	printf("mss: %llu bytes of segments loaded\n", (unsigned long long)total);
 
-	/* 4. tell the AOP (Linux q6v5_prepare: before the Q6 runs), then authenticate and release reset */
-	qmp_send("{class: image, res: load_state, name: modem, val: on}");
-	/* a restart keeps the last run's state bits until the modem rewrites them: forget them */
+	/* 8. MPSS to the modem only, wait for the MBA's verdict */
 	uint64_t ve;
 	if (smp2p_in_entry("slave-kernel", &ve) == 0)
-		wr32(ve, 0);
+		wr32(ve, 0);				/* forget a previous run's ready/fatal bits */
 	modem_state = 0xffffffff;
-	rc = scm(5, 1, PAS_MODEM, 0, 0, &r1);
-	printf("boot: auth and reset -> %lld/%llx\n", (long long)rc, (unsigned long long)r1);
-	if (rc || r1)
+	if (mem_owner("mpss", MPSS_PA, MPSS_SIZE, &mpss_owners, 0, 1)) {
+		mss_fail();
 		return -1;
+	}
+	st = rmb_wait(4, 10000);
+	printf("mss: MPSS authentication -> status %d%s\n", st, st == 4 ? " (complete)" : "");
+	if (st != 4) {
+		mss_fail();
+		return -1;
+	}
 
-	/* 5. wait for SMP2P in: "ready" (bit 1) from the modem */
+	/* 9. wait for SMP2P in: "ready" (bit 1), then the MBA region back to apps */
 	for (int t = 0; t < 300; t++) {
 		uint32_t v;
 		smp2p_service();
-		/* after a crash the old entry still says ready + fatal until the modem rewrites it */
 		if (smp2p_in_value("slave-kernel", &v) == 0 && (v & 2) && !(v & 1)) {
-			printf("boot: modem ready after %d00 ms\n", t);
+			printf("mss: modem ready after %d00 ms\n", t);
+			mem_owner("mba", MBA_PA, MBA_SIZE, &mba_owners, 1, 0);
 			return 0;
 		}
 		usleep(100000);
 	}
-	printf("boot: no ready from the modem in 30 s\n");
+	printf("mss: no ready from the modem in 30 s\n");
 	smp2p_show("in", 435);
+	mem_owner("mba", MBA_PA, MBA_SIZE, &mba_owners, 1, 0);
 	return -1;
+}
+
+static int boot_modem(void)
+{
+	return boot_modem_stage(3);
 }
 
 static void net_cb(const struct qrtr_hdr *h, const uint8_t *d, uint32_t n)
@@ -819,7 +1101,9 @@ int main(int argc, char **argv)
 	} else if (!strcmp(c, "wlan-power")) {
 		return wlan_power() ? 1 : 0;
 	} else if (!strcmp(c, "boot")) {
-		return boot_modem() ? 1 : 0;
+		/* "boot clocks" / "boot mba" stop after that stage; plain "boot" runs the modem */
+		int stage = argc > 2 && !strcmp(argv[2], "clocks") ? 1 : argc > 2 && !strcmp(argv[2], "mba") ? 2 : 3;
+		return boot_modem_stage(stage) ? 1 : 0;
 	} else if (!strcmp(c, "bcm") && argc > 3) {
 		/* a BCM (bus) vote: x = average, y = peak, in the BCM's own units (0x3fff = its top level); commit + valid */
 		uint32_t x = (uint32_t)strtoul(argv[2 + 1], NULL, 0) & 0x3fff, y = argc > 4 ? (uint32_t)strtoul(argv[4], NULL, 0) & 0x3fff : x;

@@ -3,7 +3,8 @@
 #include "pmem.h"
 #include "scm.h"
 
-int hyp_assign(uint64_t pa, uint64_t size, const uint32_t *src, int nsrc, const uint32_t *dst, int ndst)
+int hyp_assign_perm(uint64_t pa, uint64_t size, const uint32_t *src, int nsrc, const uint32_t *dst, const uint32_t *perm,
+		    int ndst)
 {
 	uint64_t t = pm_alloc(4096, 4096);
 	if (!t || nsrc > 8 || ndst > 8)
@@ -12,7 +13,7 @@ int hyp_assign(uint64_t pa, uint64_t size, const uint32_t *src, int nsrc, const 
 	struct { uint32_t vm, perm; uint64_t ctx; uint32_t ctx_size, pad; } d[8] = { { 0 } };
 	for (int i = 0; i < ndst; i++) {
 		d[i].vm = dst[i];
-		d[i].perm = 6;					/* read | write */
+		d[i].perm = perm ? perm[i] : PERM_RW;
 	}
 	uint64_t ext[4] = { 4ull * nsrc, t + 128, sizeof(d[0]) * ndst, 0 };
 	pm_wr(t, mem, sizeof(mem));
@@ -27,4 +28,9 @@ int hyp_assign(uint64_t pa, uint64_t size, const uint32_t *src, int nsrc, const 
 	printf("scm: hyp_assign %llx+%llx to %d vm(s) -> %lld\n", (unsigned long long)pa, (unsigned long long)size, ndst,
 	       (long long)x[0]);
 	return x[0] ? -1 : 0;
+}
+
+int hyp_assign(uint64_t pa, uint64_t size, const uint32_t *src, int nsrc, const uint32_t *dst, int ndst)
+{
+	return hyp_assign_perm(pa, size, src, nsrc, dst, NULL, ndst);
 }
