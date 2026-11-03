@@ -374,3 +374,23 @@ Metal, in order:
   alternating its last two frames. No GPU hang. Log: logs/boot-0090v-shortcuts.txt (from the userdata log ring read
   through /dev/rufsroot0 with `bonito-files.py read`; no TWRP needed).
 - Mitigation: GPUPOOL_MB=1024 (shim-boot-0090v-metal-pool1g.img): user opened every app, no freeze. Real fixes: allocator fragmentation; map allocation failure to OOM, not DeviceLost.
+
+### Wi-Fi step 2: MBA modem boot in wland (2026-11-03, commits c93e622 + dff410d, untested on hardware)
+- Firmware from the factory zip (gitignored research/modem): radio-*.img is FBPK v1 with one entry "modem" (FAT16 at
+  file offset 0x8c, 0x47a3000 bytes; read with mtools): image/mba.mbn (238304 B), modem.mdt + modem.b00..b30.
+  vendor.img /firmware: wlanmdsp.mbn (3036932 B), bdwlan-bonito{,-USA,-ROW,-JPN,-VZW}.bin (19152 B each).
+  On the phone in /var/local/fw/modem (sha256 verified). bonito-files.py PUT times out on files > ~20 MB over
+  ecm-tap (b17, b21): use `tools/bonito-ssh "cat > F" < F` (~300 KB/s).
+- **Live addresses (dtbo), not the boot.img DT ones:** MPSS 0x8b000000+0x9800000 (modem.mdt load range is exactly
+  0x8b000000..0x94800000, relocatable, hash segment at 0x94800000), MBA 0x95600000+0x200000, WLAN MSA 0x94d00000+0x100000.
+  wland had 0x7e00000 / MSA 0x93300000: fixed.
+- Stock DT qcom,mss@4080000: qcom,pil-self-auth, qcom,qdsp6v65-1-0, override-acc, mem-protect-id 0xf, mss_pdc_offset 9.
+  Port follows mainline sdm845_mss (MSS_SDM845, has_alt_reset): AOSS MSS restart 0xc2b0000 (1, 200-300 us, 0),
+  PDC sync reset 0xb2e0100 bit 9, RMB 0x4180000 (+0x44 alt reset), QDSP6SS 0x4080000 (SLEEP 0x3c, BOOT_CORE_START 0x400,
+  BOOT_CMD 0x404), halt regs 0x1f63000/0x1f65000/0x1f64000. GCC (0x100000) clocks: iface MSS_CFG_AHB 0x8a000,
+  snoc_axi 0x8a150, bus MSS_Q6_MEMNOC_AXI 0x8a154, mnoc_axi MSS_MFAB_AXIS 0x8a004; votes in 0x52004: mem/boot_rom bit 10,
+  prng bit 13, gpll0_mss bit 17. Rails: cx.lvl, mx.lvl, mss.lvl at their top level.
+- `wland boot clocks` (stage 1: load_state, votes, clocks, reset) / `wland boot mba` (stage 2: + MBA running) /
+  `wland boot` (full: metadata + segment auth over RMB, SMP2P ready). Region ownership persists in
+  /var/local/wland-mss-owners (a run must never write into a region the modem owns). After `boot mba`, reboot the phone
+  before another attempt.
