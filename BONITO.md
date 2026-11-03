@@ -394,3 +394,7 @@ Metal, in order:
   `wland boot` (full: metadata + segment auth over RMB, SMP2P ready). Region ownership persists in
   /var/local/wland-mss-owners (a run must never write into a region the modem owns). After `boot mba`, reboot the phone
   before another attempt.
+- **Stage 1 OK (2026-11-03, wland dff410d, sha256 009cfcda...):** `wland boot clocks`: QMP load_state acked; votes
+  cx.lvl[7] mx.lvl[4] mss.lvl[8] rc 0; CBCRs iface/snoc_axi/bus/mnoc_axi = 00000001, boot_rom 00004220, prng 00000000
+  (all CLK_OFF clear); alt reset done (pdc 0); RMB readable, no bus hang: all zero except MBA_MSS_STATUS (0x40) = 0x0000000c.
+  Phone unaffected. Log on the phone: /var/local/wland-boot-clocks.log.
